@@ -339,7 +339,7 @@ def fused_recurrent_delta_rule_fwd(
         num_stages=num_stages,
     )
     o = o.squeeze(0)
-    return o, u, final_state
+    return o, u, final_state, final_scale
 
 
 def fused_recurrent_delta_rule_bwd(
@@ -437,7 +437,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
 
-        o, u, final_state = fused_recurrent_delta_rule_fwd(
+        o, u, final_state, final_scale = fused_recurrent_delta_rule_fwd(
             q=q,
             k=k,
             v=v,
@@ -453,14 +453,14 @@ class FusedRecurrentFunction(torch.autograd.Function):
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        return o, final_state
+        return o, final_state, final_scale
 
     @staticmethod
     @input_guard
     def backward(ctx, do, dht):
         q, q_rstd, k, k_rstd, v, beta, initial_state, initial_scale = ctx.saved_tensors
         dq, dk, dv, db, dh0 = fused_recurrent_delta_rule_bwd(
-            q=q,
+            q=q,   
             k=k,
             v=v,
             beta=beta,
@@ -474,7 +474,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-        return dq.to(q), dk.to(k), dv.to(v), db.to(beta), None, dh0, None, None, None
+        return dq.to(q), dk.to(k), dv.to(v), db.to(beta), None, dh0, None, None, None, None
 
 
 @torch.compiler.disable
@@ -485,10 +485,11 @@ def fused_recurrent_delta_rule(
     beta: torch.Tensor = None,
     scale: float = None,
     initial_state: torch.Tensor = None,
+    initial_scale: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+)-> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     r"""
     Args:
         q (torch.Tensor):
@@ -565,17 +566,15 @@ def fused_recurrent_delta_rule(
         assert scale > 0, "scale must be positive"
     if beta is None:
         beta = torch.ones_like(q[..., 0])
-    print("Beta", beta)
-    o, final_state = FusedRecurrentFunction.apply(
-        q,
-        k,
-        v,
-        beta,
-        scale,
-        initial_state,
-        output_final_state,
-        use_qk_l2norm_in_kernel,
-        cu_seqlens,
+    if initial_scale is None:
+        B, H, K = q.shape[0], q.shape[2], q.shape[3]
+        N = B if cu_seqlens is None else len(cu_seqlens) - 1
+        initial_scale = q.new_zeros(N, H, K, dtype=torch.float32)
+    o, final_state, final_scale = FusedRecurrentFunction.apply(
+        q, k, v, beta, scale,
+        initial_state, initial_scale,
+        output_final_state, use_qk_l2norm_in_kernel, cu_seqlens,
     )
-    # print(cu_seqlens)
-    return o, final_state
+    if output_final_state:
+        return o, (final_state, final_scale)
+    return o, None
