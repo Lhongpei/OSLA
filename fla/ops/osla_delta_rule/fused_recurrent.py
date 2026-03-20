@@ -116,35 +116,17 @@ def fused_recurrent_delta_rule_fwd_kernel(
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_delta_rule_bwd_kernel(
-    q,
-    k,
-    v,
-    beta,
-    h0,
-    dh0,
-    dht,
-    do,
-    dq,
-    dk,
-    dv,
-    db,
-    cu_seqlens,
-    scale,
-    B: tl.constexpr,
-    T,
-    H: tl.constexpr,
-    K: tl.constexpr,
-    V: tl.constexpr,
-    BK: tl.constexpr,
-    BV: tl.constexpr,
-    NK: tl.constexpr,
-    IS_BETA_HEADWISE: tl.constexpr,  # whether beta is headwise vector or scalar
-    USE_INITIAL_STATE: tl.constexpr,  # whether to use dh0
-    USE_FINAL_STATE_GRADIENT: tl.constexpr,  # whether to use dht
-    IS_VARLEN: tl.constexpr,
+    q, k, v, beta, h0, dh0, dht, do, dq, dk, dv, db,
+    scale_0,  # <-- NEW: Needed to initialize D_0
+    cu_seqlens, scale,
+    B: tl.constexpr, T, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
+    BK: tl.constexpr, BV: tl.constexpr, NK: tl.constexpr,
+    IS_BETA_HEADWISE: tl.constexpr, USE_INITIAL_STATE: tl.constexpr,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr, IS_VARLEN: tl.constexpr,
 ):
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_h = i_nh // H, i_nh % H
+    
     if IS_VARLEN:
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(cu_seqlens + i_n + 1).to(tl.int64)
         all = T
@@ -162,6 +144,7 @@ def fused_recurrent_delta_rule_bwd_kernel(
     p_do = do + (bos * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
     p_dk = dk + ((i_v * all + bos) * H + i_h) * K + i_k * BK + tl.arange(0, BK) + (T - 1) * H*K
     p_dv = dv + ((i_k * all + bos) * H + i_h) * V + i_v * BV + tl.arange(0, BV) + (T - 1) * H*V
+    
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos + T - 1) * H*V + i_h * V + i_v * BV + tl.arange(0, BV)
         p_dbeta = db + ((i_v * NK + i_k) * all + bos + T - 1) * H*V + i_h * V + tl.arange(0, BV)
@@ -174,30 +157,60 @@ def fused_recurrent_delta_rule_bwd_kernel(
         p_ht = dht + i_nh * K * V + (i_k * BK + tl.arange(0, BK)[:, None]) * V + (i_v * BV + tl.arange(0, BV)[None, :])
         b_dh += tl.load(p_ht, mask=mask_k[:, None] & mask_v[None, :], other=0).to(tl.float32)
 
+    # --- Recompute D_T (b_scale) for the reverse loop ---
+    p_scale_0 = scale_0 + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    b_scale = tl.zeros([BK], dtype=tl.float32)
+    b_scale += tl.load(p_scale_0, mask=mask_k, other=0).to(tl.float32)
+    p_k_fwd = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    for _ in range(T):
+        b_k_fwd = tl.load(p_k_fwd, mask=mask_k, other=0).to(tl.float32)
+        b_scale += b_k_fwd * b_k_fwd
+        p_k_fwd += H*K
+    # ----------------------------------------------------
+
+    b_dD_acc = tl.zeros([BK], dtype=tl.float32)
+
+    # Loop 1: Reverse Time
     for _ in range(T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32) * scale
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
-        b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)
+        b_v = tl.load(p_v, mask=mask_v, other=0).to(tl.float32)  # This is u_t from forward
         b_do = tl.load(p_do, mask=mask_v, other=0).to(tl.float32)
         if IS_BETA_HEADWISE:
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
             b_beta = tl.load(p_beta).to(tl.float32)
-        b_dh += b_q[:, None] * b_do[None, :]
-        b_dk = tl.sum(b_dh * (b_v * b_beta)[None, :], axis=1)
-        b_dv = tl.sum(b_dh * b_k[:, None], axis=0)
+            
+        b_p = b_k / (b_scale + 1e-5) # p_t = k_t / D_t
 
-        b_db = b_dv * b_v if IS_BETA_HEADWISE else tl.sum(b_dv * b_v)
-        b_dv = b_dv * b_beta
+        b_dh += b_q[:, None] * b_do[None, :]
+        
+        # Gradients wrt p_t and \tilde{u}_t
+        b_dp = tl.sum(b_dh * (b_v * b_beta)[None, :], axis=1)
+        b_d_utilde = tl.sum(b_dh * b_p[:, None], axis=0)
+
+        # Gradients wrt beta and u_t
+        b_db = b_d_utilde * b_v if IS_BETA_HEADWISE else tl.sum(b_d_utilde * b_v)
+        b_du = b_d_utilde * b_beta # This is du_t (and effectively dv_t)
+
+        # Gradients wrt D_t and k_t
+        b_dD = - b_dp * b_p / (b_scale + 1e-5)
+        b_dD_acc += b_dD
+        
+        b_dk = b_dp / (b_scale + 1e-5) + 2 * b_k * b_dD_acc
 
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=mask_k)
-        tl.store(p_dv, b_dv.to(p_dv.dtype.element_ty), mask=mask_v)
+        tl.store(p_dv, b_du.to(p_dv.dtype.element_ty), mask=mask_v)
+        
         if IS_BETA_HEADWISE:
             tl.store(p_dbeta, b_db.to(p_dbeta.dtype.element_ty), mask=mask_v)
         else:
             tl.store(p_dbeta, b_db.to(p_dbeta.dtype.element_ty))
 
-        b_dh -= b_k[:, None] * b_dv[None, :]
+        b_dh -= b_k[:, None] * b_du[None, :]
+        
+        # Step D_t backwards!
+        b_scale -= b_k * b_k
 
         p_q -= H*K
         p_k -= H*K
@@ -214,7 +227,10 @@ def fused_recurrent_delta_rule_bwd_kernel(
 
     tl.debug_barrier()
 
+    # Loop 2: Forward Time
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
+    b_scale = tl.zeros([BK], dtype=tl.float32)
+    b_scale += tl.load(p_scale_0, mask=mask_k, other=0).to(tl.float32)
 
     p_q = q + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
     p_k = k + (bos * H + i_h) * K + i_k * BK + tl.arange(0, BK)
@@ -236,7 +252,7 @@ def fused_recurrent_delta_rule_bwd_kernel(
     for _ in range(0, T):
         b_dk = tl.load(p_dk, mask=mask_k, other=0).to(tl.float32)
         b_dv = tl.load(p_dv, mask=mask_v, other=0).to(tl.float32)
-        b_dk -= tl.sum(b_dv[None, :] * b_h, axis=1)
+        b_dk -= tl.sum(b_dv[None, :] * b_h, axis=1) # -S_{t-1}^T du_t
         tl.store(p_dk, b_dk.to(p_dk.dtype.element_ty), mask=mask_k)
 
         b_k = tl.load(p_k, mask=mask_k, other=0).to(tl.float32)
@@ -246,9 +262,16 @@ def fused_recurrent_delta_rule_bwd_kernel(
             b_beta = tl.load(p_beta, mask=mask_v, other=0).to(tl.float32)
         else:
             b_beta = tl.load(p_beta).to(tl.float32)
-        b_v *= b_beta
+        
+        b_v *= b_beta # \tilde{u}_t
 
-        b_h += b_k[:, None] * b_v[None, :]
+        # Step D_t forward
+        b_scale += b_k * b_k
+        b_p = b_k / (b_scale + 1e-5)
+
+        # Update S_t with preconditioner p_t
+        b_h += b_p[:, None] * b_v[None, :]
+        
         b_dq = b_h * b_do[None, :]
         d_q = tl.sum(b_dq, axis=1) * scale
         tl.store(p_dq, d_q.to(p_dq.dtype.element_ty), mask=mask_k)
@@ -328,6 +351,7 @@ def fused_recurrent_delta_rule_bwd(
     do: torch.Tensor,
     scale: float,
     initial_state: torch.Tensor,
+    initial_scale: torch.Tensor,
     cu_seqlens: Optional[torch.LongTensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
@@ -360,6 +384,7 @@ def fused_recurrent_delta_rule_bwd(
         v,
         beta,
         initial_state,
+        initial_scale,
         dh0,
         dht,
         do,
@@ -424,7 +449,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
         )
 
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, u, beta, initial_state)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, u, beta, initial_state, initial_scale)
         ctx.scale = scale
         ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -433,7 +458,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
     def backward(ctx, do, dht):
-        q, q_rstd, k, k_rstd, v, beta, initial_state = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, beta, initial_state, initial_scale = ctx.saved_tensors
         dq, dk, dv, db, dh0 = fused_recurrent_delta_rule_bwd(
             q=q,
             k=k,
@@ -443,6 +468,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             do=do,
             scale=ctx.scale,
             initial_state=initial_state,
+            initial_scale=initial_scale,
             cu_seqlens=ctx.cu_seqlens,
         )
         if ctx.use_qk_l2norm_in_kernel:
