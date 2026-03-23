@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-
+from fla.ops.osla_delta_rule.fused_recurrent import fused_recurrent_delta_rule
 
 def reference_recurrent_delta_rule(q, k, v, beta, scale, h0=None, d0=None):
     B, T, H, K = q.shape
@@ -77,16 +77,20 @@ def test_gradients():
         q_ref, k_ref, v_ref, beta_ref, scale, h0_ref, d0=None
     )
     
-    o_tri, ht_tri = fused_recurrent_delta_rule(
+    # 1. 修正接收返回值的方式
+    o_tri, (ht_tri, scale_tri) = fused_recurrent_delta_rule(
         q_tri, k_tri, v_tri, beta_tri, scale, initial_state=h0_tri, output_final_state=True
     )
     
     print(f"输出 o 的最大误差: {(o_ref - o_tri).abs().max().item():.6f}")
+    
+    # 2. 修正 ht 的对比逻辑 (ht_tri 现在是元组中的第一个元素)
     print(f"终态 ht 的最大误差: {(ht_ref - ht_tri).abs().max().item():.6f}")
 
     print("\n=== 开始反向传播比对 ===")
     dout = torch.randn_like(o_ref)
     
+    # 如果你的 Reference 没算 dht，这里保持不变
     loss_ref = (o_ref * dout).sum()
     loss_ref.backward()
     
