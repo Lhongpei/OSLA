@@ -64,7 +64,8 @@ class OSLABlock(nn.Module):
                 qk_norm=config.qk_norm,
                 qk_activation=config.qk_activation,
                 norm_eps=config.norm_eps,
-                layer_idx=layer_idx
+                layer_idx=layer_idx,
+                use_osla=True,
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = DeltaNetMLP(

@@ -105,7 +105,7 @@ def fused_recurrent_delta_rule_fwd_kernel(
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_delta_rule_bwd_kernel(
     q, k, v, beta, h0, dh0, dht, do, dq, dk, dv, db,
-    scale_0, cu_seqlens, scale,
+    scale_0, d_scale_0, cu_seqlens, scale,
     B: tl.constexpr, T, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
     BK: tl.constexpr, BV: tl.constexpr, NK: tl.constexpr,
     IS_BETA_HEADWISE: tl.constexpr, USE_INITIAL_STATE: tl.constexpr,
@@ -258,6 +258,11 @@ def fused_recurrent_delta_rule_bwd_kernel(
     if USE_INITIAL_STATE:
         p_dh0 = dh0 + i_n * H * K * V + i_h * K * V + (i_k * BK + tl.arange(0, BK)[:, None]) * V + (i_v * BV + tl.arange(0, BV)[None, :])
         tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=mask_k[:, None] & mask_v[None, :])
+
+    # Store dL/dD_0 (accumulated preconditioner gradient)
+    # b_dd is [BK], one per V-block (i_v). Sum across V-blocks happens outside.
+    p_ds0 = d_scale_0 + (i_v * (B if not IS_VARLEN else 1) * H + i_n * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    tl.store(p_ds0, b_dd.to(p_ds0.dtype.element_ty), mask=mask_k)
 
     tl.debug_barrier()
     
@@ -416,6 +421,9 @@ def fused_recurrent_delta_rule_bwd(
     else:
         dh0 = None
 
+    # d_scale_0: gradient of initial_scale, shape [NV, N, H, K] (sum over NV blocks later)
+    d_scale_0 = q.new_empty(NV, N, H, K, dtype=torch.float32)
+
     fused_recurrent_delta_rule_bwd_kernel[grid](
         q,
         k,
@@ -430,6 +438,7 @@ def fused_recurrent_delta_rule_bwd(
         dv,
         db,
         initial_scale,
+        d_scale_0,
         cu_seqlens,
         scale,
         T=T,
@@ -448,8 +457,9 @@ def fused_recurrent_delta_rule_bwd(
     dk = dk.sum(0)
     dv = dv.sum(0)
     db = db.sum((0, 1)) if beta_vector else db.sum(0)
+    d_scale_0 = d_scale_0.sum(0)
 
-    return dq, dk, dv, db, dh0
+    return dq, dk, dv, db, dh0, d_scale_0
 
 
 class FusedRecurrentFunction(torch.autograd.Function):
@@ -499,10 +509,10 @@ class FusedRecurrentFunction(torch.autograd.Function):
     def backward(ctx, do, dht, d_final_scale):
         q, q_rstd, k, k_rstd, u, beta, initial_state, initial_scale = ctx.saved_tensors
         
-        dq, dk, dv, db, dh0 = fused_recurrent_delta_rule_bwd(
-            q=q, 
+        dq, dk, dv, db, dh0, d_scale_0 = fused_recurrent_delta_rule_bwd(
+            q=q,
             k=k,
-            v=u,           # 这里的 u 是前向存下的中间变量 (utilde/beta)
+            v=u,           # u is the stored innovation from forward
             beta=beta,
             dht=dht,
             do=do,
@@ -511,14 +521,14 @@ class FusedRecurrentFunction(torch.autograd.Function):
             initial_scale=initial_scale,
             cu_seqlens=ctx.cu_seqlens,
         )
-        
+
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-            
-        # 返回值顺序对应 forward 的输入参数：
+
+        # Return order matches forward inputs:
         # q, k, v, beta, scale, initial_state, initial_scale, output_final_state, use_qk_l2norm, cu_seqlens
-        return dq.to(q), dk.to(k), dv.to(u), db.to(beta), None, dh0, None, None, None, None
+        return dq.to(q), dk.to(k), dv.to(u), db.to(beta), None, dh0, d_scale_0, None, None, None
 
 
 @torch.compiler.disable

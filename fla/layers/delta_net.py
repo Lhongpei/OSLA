@@ -15,6 +15,7 @@ from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 from fla.ops.osla_delta_rule.fused_recurrent import fused_recurrent_delta_rule as fused_recurrent_delta_rule_osla
+from fla.ops.osla_delta_rule.chunk import chunk_osla_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -89,6 +90,7 @@ class DeltaNet(nn.Module):
         qk_activation: str = 'silu',
         qk_norm: str = 'l2',
         norm_eps: float = 1e-5,
+        use_osla: bool = False,
         **kwargs
     ) -> DeltaNet:
         super().__init__()
@@ -96,6 +98,7 @@ class DeltaNet(nn.Module):
         self.mode = mode
         self.qk_activation = qk_activation
         self.qk_norm = qk_norm
+        self.use_osla = use_osla
 
         assert self.qk_activation in ['silu', 'relu', 'elu', 'identity']
         assert self.qk_norm in ['l2', 'sum']
@@ -163,6 +166,9 @@ class DeltaNet(nn.Module):
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps)
 
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
+
+        if use_osla:
+            self.initial_scale = nn.Parameter(torch.zeros(num_heads, self.head_k_dim))
 
     def forward(
         self,
@@ -246,13 +252,11 @@ class DeltaNet(nn.Module):
             beta = beta * 2.
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        # print(recurrent_state.shape)
         if use_osla:
             intial_state, initial_scale = recurrent_state if recurrent_state is not None else (None, None)
             if initial_scale is None:
                 N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
-                initial_scale = q.new_zeros(N, q.shape[2], q.shape[3], dtype=torch.float32)
-            mode = 'fused_recurrent'
+                initial_scale = self.initial_scale.unsqueeze(0).expand(N, -1, -1).contiguous().float()
         if mode == 'fused_recurrent':
             if use_osla:
                 o, recurrent_state = fused_recurrent_delta_rule_osla(
@@ -278,16 +282,29 @@ class DeltaNet(nn.Module):
                     use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
                 )
         elif mode == 'chunk':
-            o, recurrent_state = chunk_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                beta=beta,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
-            )
+            if use_osla:
+                o, recurrent_state = chunk_osla_delta_rule(
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    initial_state=intial_state,
+                    initial_scale=initial_scale,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
+                )
+            else:
+                o, recurrent_state = chunk_delta_rule(
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    initial_state=recurrent_state,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
+                )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 
