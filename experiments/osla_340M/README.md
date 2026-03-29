@@ -2,7 +2,7 @@
 
 ## Overview
 
-This experiment compares **OSLA (Optimal State Linear Attention)** against the standard **DeltaNet** (delta rule linear attention) on a 340M-parameter language model pretraining task.
+This experiment compares **OSLA (Online Scaled Linear Attention)** against the standard **DeltaNet** (delta rule linear attention) on a 340M-parameter language model pretraining task.
 
 OSLA extends DeltaNet by introducing an **adaptive per-dimension preconditioner** to the state update rule:
 
