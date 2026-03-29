@@ -33,7 +33,10 @@ __pycache__
 # saved model
 *.pkl
 *.pt
+*.safetensors
 
+# allow experiment configs, scripts, and reports
+!experiments/**
 
 # vscode
 .vscode

@@ -13,7 +13,8 @@ from torch.nn import functional as F
 
 from fla.layers.utils import get_unpad_data, index_first_axis, pad_input
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
-from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule, fused_recurrent_delta_rule_osla
+from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
+from fla.ops.osla_delta_rule.fused_recurrent import fused_recurrent_delta_rule as fused_recurrent_delta_rule_osla
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -248,6 +249,9 @@ class DeltaNet(nn.Module):
         # print(recurrent_state.shape)
         if use_osla:
             intial_state, initial_scale = recurrent_state if recurrent_state is not None else (None, None)
+            if initial_scale is None:
+                N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
+                initial_scale = q.new_zeros(N, q.shape[2], q.shape[3], dtype=torch.float32)
             mode = 'fused_recurrent'
         if mode == 'fused_recurrent':
             if use_osla:

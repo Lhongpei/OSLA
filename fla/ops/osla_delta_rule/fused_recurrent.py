@@ -81,8 +81,8 @@ def fused_recurrent_delta_rule_fwd_kernel(
             b_beta = tl.load(p_beta).to(tl.float32)
         
         # S_t = S_{t-1} + (beta * u_t) k_t^T / D_t
-        b_h += (b_v * b_beta)[:, None] * b_k[None, :] / (b_scale[None, :] + 1e-5)
-        
+        b_h += (b_v * b_beta)[:, None] * b_k[None, :] / (b_scale[None, :] + 1.0)
+
         # o_t = S_t q_t
         b_o = tl.sum(b_h * b_q[None, :], axis=1)
         tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
@@ -180,7 +180,7 @@ def fused_recurrent_delta_rule_bwd_kernel(
         # dL/d(beta * u_t) = S_t^T^T dL/dS_t^T 的内积？不对
         # 实际上：dL/d(beta * u_t) = (dL/dS_t^T)^T @ p_t
         # b_dh: [K, V], p_t: [K],需要计算 b_dh^T @ p_t
-        b_p = b_k / (b_scale + 1e-5)  # [BK]
+        b_p = b_k / (b_scale + 1.0)  # [BK]
         b_beta_u = b_u * b_beta  # [BV]
         
         # dL/d(beta * u_t) [BV] = b_dh^T [V, K] @ p_t [K]
@@ -197,10 +197,10 @@ def fused_recurrent_delta_rule_bwd_kernel(
         
         # p_t = k_t / d_t
         # dL/dk_t (来自 p_t) = dL/dp_t / d_t
-        b_dk_from_p = b_dp / (b_scale + 1e-5)  # [BK]
-        
+        b_dk_from_p = b_dp / (b_scale + 1.0)  # [BK]
+
         # dL/dd_t (来自 p_t) = -dL/dp_t * k_t / d_t^2 = -dL/dp_t * p_t / d_t
-        b_dd -= b_dp * b_p / (b_scale + 1e-5)  # [BK]
+        b_dd -= b_dp * b_p / (b_scale + 1.0)  # [BK]
         
         # d_t = d_{t-1} + k_t^2
         # dL/dk_t (来自 d_t) = 2 * k_t * dL/dd_t (累积的)
@@ -309,8 +309,8 @@ def fused_recurrent_delta_rule_bwd_kernel(
 
         # 更新状态用于下一个时间步的 dq 计算
         b_scale += b_k * b_k
-        b_h += (b_u * b_beta)[:, None] * b_k[None, :] / (b_scale[None, :] + 1e-5)
-        
+        b_h += (b_u * b_beta)[:, None] * b_k[None, :] / (b_scale[None, :] + 1.0)
+
         # o_t = S_t q_t
         # dL/dq_t = S_t^T @ dL/do_t = b_h^T @ b_do
         # b_h 是 S_t [V, K]，b_h^T 是 [K, V]

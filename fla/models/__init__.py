@@ -22,6 +22,7 @@ from fla.models.mamba2 import Mamba2Config, Mamba2ForCausalLM, Mamba2Model
 from fla.models.mesa_net import MesaNetConfig, MesaNetForCausalLM, MesaNetModel
 from fla.models.mla import MLAConfig, MLAForCausalLM, MLAModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
+from fla.models.osla import OSLAConfig, OSLAForCausalLM, OSLAModel
 from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
 from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
 from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel
@@ -49,6 +50,7 @@ __all__ = [
     'MesaNetConfig', 'MesaNetForCausalLM', 'MesaNetModel',
     'MLAConfig', 'MLAForCausalLM', 'MLAModel',
     'NSAConfig', 'NSAForCausalLM', 'NSAModel',
+    'OSLAConfig', 'OSLAForCausalLM', 'OSLAModel',
     'PaTHAttentionConfig', 'PaTHAttentionForCausalLM', 'PaTHAttentionModel',
     'RetNetConfig', 'RetNetForCausalLM', 'RetNetModel',
     'RodimusConfig', 'RodimusForCausalLM', 'RodimusModel',
