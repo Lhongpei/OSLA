@@ -36,7 +36,7 @@ def reference_recurrent_delta_rule(q, k, v, beta, scale, h0=None, d0=None):
         tilde_u_t = u_t * beta_t
         
         # 4. p_t = k_t / (D_t + eps)
-        p_t = k_t / (d + 1e-5)
+        p_t = k_t / (d + 1)
         
         # 5. S_t = S_{t-1} + \tilde{u}_t p_t^T
         # 外积: [B, H, V, 1] @ [B, H, 1, K] -> [B, H, V, K]
