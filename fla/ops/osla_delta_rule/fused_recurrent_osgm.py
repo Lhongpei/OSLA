@@ -117,16 +117,17 @@ def fused_recurrent_delta_rule_fwd_kernel(
 @triton.heuristics({
     'USE_INITIAL_STATE': lambda args: args['h0'] is not None,
     'USE_FINAL_STATE_GRADIENT': lambda args: args['dht'] is not None,
+    'USE_FINAL_SCALE_GRADIENT': lambda args: args['d_scale_t'] is not None,
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
 })
 @triton.jit(do_not_specialize=['T'])
 def fused_recurrent_delta_rule_bwd_kernel(
     q, k, v, d_out, beta, h0, dh0, dht, do, dq, dk, dv, db,
-    scale_0, d_scale_0, cu_seqlens, scale, eta, d_min, d_max,
+    scale_0, d_scale_0, d_scale_t, cu_seqlens, scale, eta, d_min, d_max,
     B: tl.constexpr, T, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
     BK: tl.constexpr, BV: tl.constexpr, NK: tl.constexpr,
     IS_BETA_HEADWISE: tl.constexpr, USE_INITIAL_STATE: tl.constexpr,
-    USE_FINAL_STATE_GRADIENT: tl.constexpr, IS_VARLEN: tl.constexpr,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr, USE_FINAL_SCALE_GRADIENT: tl.constexpr, IS_VARLEN: tl.constexpr,
     USE_DENOMINATOR: tl.constexpr, USE_PROJECTION: tl.constexpr
 ):
     i_v, i_k, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -163,7 +164,11 @@ def fused_recurrent_delta_rule_bwd_kernel(
         p_dht = dht + i_n * H * K * V + i_h * K * V + (i_k * BK + tl.arange(0, BK)[:, None]) * V + (i_v * BV + tl.arange(0, BV)[None, :])
         b_dh += tl.load(p_dht, mask=mask_k[:, None] & mask_v[None, :], other=0).to(tl.float32)
 
+    # 💥 核心：将末尾的 d 梯度接收进来，不再是纯 0！
     b_dd = tl.zeros([BK], dtype=tl.float32)
+    if USE_FINAL_SCALE_GRADIENT:
+        p_dst = d_scale_t + i_n * H * K + i_h * K + i_k * BK + tl.arange(0, BK)
+        b_dd += tl.load(p_dst, mask=mask_k, other=0).to(tl.float32)
 
     for _ in range(T):
         b_q = tl.load(p_q, mask=mask_k, other=0).to(tl.float32) * scale
@@ -342,6 +347,7 @@ def fused_recurrent_delta_rule_bwd(
     d_out: torch.Tensor,
     beta: torch.Tensor,
     dht: torch.Tensor,
+    d_scale_t: torch.Tensor,
     do: torch.Tensor,
     scale: float,
     eta: float,
@@ -384,7 +390,7 @@ def fused_recurrent_delta_rule_bwd(
 
     fused_recurrent_delta_rule_bwd_kernel[grid](
         q, k, v, d_out, beta, initial_state, dh0, dht, do, dq, dk, dv, db,
-        initial_scale, d_scale_0, cu_seqlens, scale, eta, d_min_val, d_max_val,
+        initial_scale, d_scale_0, d_scale_t, cu_seqlens, scale, eta, d_min_val, d_max_val,
         T=T, B=B, H=H, K=K, V=V, BK=BK, BV=BV, NK=NK,
         IS_BETA_HEADWISE=beta_vector,
         num_warps=num_warps, num_stages=num_stages,
@@ -414,10 +420,6 @@ class FusedRecurrentFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
             
-        N, H, K = (q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1), q.shape[2], q.shape[3]
-        if initial_scale is None:
-            initial_scale = q.new_zeros(N, H, K, dtype=torch.float32)
-            
         o, u, d_out, final_state, final_scale = fused_recurrent_delta_rule_fwd(
             q=q, k=k, v=v, beta=beta, scale=scale, eta=eta,
             initial_state=initial_state, initial_scale=initial_scale,
@@ -441,7 +443,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         q, q_rstd, k, k_rstd, u, d_out, beta, initial_state, initial_scale = ctx.saved_tensors
         
         dq, dk, dv, db, dh0, d_scale_0 = fused_recurrent_delta_rule_bwd(
-            q=q, k=k, v=u, d_out=d_out, beta=beta, dht=dht, do=do,
+            q=q, k=k, v=u, d_out=d_out, beta=beta, dht=dht, d_scale_t=d_final_scale, do=do,
             scale=ctx.scale, eta=ctx.eta,
             initial_state=initial_state, initial_scale=initial_scale,
             cu_seqlens=ctx.cu_seqlens,
@@ -492,6 +494,13 @@ def fused_recurrent_delta_rule_osgm(
     else: assert scale > 0, "scale must be positive"
     if beta is None: beta = torch.ones_like(q[..., 0])
         
+    initial_h = None
+    if initial_state is not None:
+        if isinstance(initial_state, tuple):
+            initial_h, initial_scale = initial_state
+        else:
+            initial_h = initial_state
+
     if initial_scale is None:
         B, H, K = q.shape[0], q.shape[2], q.shape[3]
         N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -499,7 +508,7 @@ def fused_recurrent_delta_rule_osgm(
         
     o, final_state, final_scale = FusedRecurrentFunction.apply(
         q, k, v, beta, scale, eta,
-        initial_state, initial_scale,
+        initial_h, initial_scale,
         output_final_state, use_qk_l2norm_in_kernel, cu_seqlens,
         use_denominator, d_min, d_max
     )
