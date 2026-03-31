@@ -1,6 +1,6 @@
 """
 Profile: Baseline DeltaNet chunk vs OSLA chunk vs OSGM chunk
-Kernel-level breakdown via torch.profiler
+Tests both non-varlen and varlen (cu_seqlens) modes to match training config.
 """
 import torch
 import torch.nn.functional as F
@@ -59,6 +59,13 @@ def make_inputs(B, T, H, K, V, device='cuda', dtype=torch.bfloat16, grad=False):
     return q, k, v, beta
 
 
+def make_cu_seqlens(total_len, context_len, device='cuda'):
+    """Create cu_seqlens for varlen packing: [0, ctx, 2*ctx, ..., total_len]"""
+    n_seqs = total_len // context_len
+    cu_seqlens = torch.arange(0, n_seqs + 1, device=device, dtype=torch.long) * context_len
+    return cu_seqlens
+
+
 def run():
     device = 'cuda'
     dtype = torch.bfloat16
@@ -66,119 +73,107 @@ def run():
     scale = K ** -0.5
     eta, d_min, d_max, use_denom = 1.0, 0.0, 2.0, False
 
-    configs = [
-        (1, 4096,  "B=1  T=4096"),
-        (1, 16384, "B=1  T=16384"),
-        (1, 65536, "B=1  T=65536 (training)"),
-        (4, 4096,  "B=4  T=4096"),
+    # Non-varlen configs
+    configs_plain = [
+        (1, 4096,  None, "B=1  T=4096"),
+        (1, 16384, None, "B=1  T=16384"),
+        (1, 65536, None, "B=1  T=65536"),
+        (4, 4096,  None, "B=4  T=4096"),
     ]
 
-    # ====== Part 1: End-to-end FWD comparison ======
-    print("=" * 80)
-    print("  FORWARD ONLY")
-    print("=" * 80)
-    print(f"{'Config':<25} {'Baseline':>10} {'OSLA':>10} {'OSGM':>10} {'OSGM/BL':>10}")
-    print("-" * 70)
+    # Varlen configs (matches training: B=1, T=65536, context_len=4096)
+    configs_varlen = [
+        (1, 65536, 4096,  "varlen T=65536 ctx=4096 (16 seqs)"),
+        (1, 65536, 2048,  "varlen T=65536 ctx=2048 (32 seqs)"),
+        (1, 65536, 8192,  "varlen T=65536 ctx=8192 (8 seqs)"),
+    ]
 
-    for B, T, label in configs:
+    all_configs = configs_plain + configs_varlen
+
+    # ====== Part 1: End-to-end FWD comparison ======
+    print("=" * 85)
+    print("  FORWARD ONLY")
+    print("=" * 85)
+    print(f"{'Config':<40} {'Baseline':>10} {'OSLA':>10} {'OSGM':>10} {'OSGM/BL':>8}")
+    print("-" * 82)
+
+    for B, T, ctx_len, label in all_configs:
         q, k, v, beta = make_inputs(B, T, H, K, V)
-        init_scale = torch.zeros(B, H, K, device=device, dtype=torch.float32)
+        cu = make_cu_seqlens(T, ctx_len, device) if ctx_len else None
+        N = len(cu) - 1 if cu is not None else B
+        init_scale = torch.zeros(N, H, K, device=device, dtype=torch.float32)
 
         t_bl = timed_fwd(chunk_delta_rule, q, k, v, beta, scale,
-                         use_qk_l2norm_in_kernel=True)
+                         use_qk_l2norm_in_kernel=True, cu_seqlens=cu)
 
         t_osla = timed_fwd(chunk_osla_delta_rule, q, k, v, beta, scale,
-                           initial_scale=init_scale, use_qk_l2norm_in_kernel=True)
+                           initial_scale=init_scale, use_qk_l2norm_in_kernel=True,
+                           cu_seqlens=cu)
 
         t_osgm = timed_fwd(chunk_delta_rule_osgm, q, k, v, beta, scale,
                            eta=eta, use_qk_l2norm_in_kernel=True,
-                           use_denominator=use_denom, d_min=d_min, d_max=d_max)
+                           use_denominator=use_denom, d_min=d_min, d_max=d_max,
+                           cu_seqlens=cu)
 
         ratio = t_osgm / t_bl
-        print(f"{label:<25} {t_bl:>8.2f}ms {t_osla:>8.2f}ms {t_osgm:>8.2f}ms {ratio:>9.2f}x")
+        print(f"{label:<40} {t_bl:>8.2f}ms {t_osla:>8.2f}ms {t_osgm:>8.2f}ms {ratio:>7.2f}x")
 
         del q, k, v, beta, init_scale
         torch.cuda.empty_cache()
 
     # ====== Part 2: End-to-end FWD+BWD comparison ======
     print()
-    print("=" * 80)
+    print("=" * 85)
     print("  FORWARD + BACKWARD")
-    print("=" * 80)
-    print(f"{'Config':<25} {'Baseline':>10} {'OSLA':>10} {'OSGM':>10} {'OSGM/BL':>10}")
-    print("-" * 70)
+    print("=" * 85)
+    print(f"{'Config':<40} {'Baseline':>10} {'OSLA':>10} {'OSGM':>10} {'OSGM/BL':>8}")
+    print("-" * 82)
 
-    for B, T, label in configs:
+    for B, T, ctx_len, label in all_configs:
         q1, k1, v1, b1 = make_inputs(B, T, H, K, V, grad=True)
         q2, k2, v2, b2 = make_inputs(B, T, H, K, V, grad=True)
         q3, k3, v3, b3 = make_inputs(B, T, H, K, V, grad=True)
-        init_scale = torch.zeros(B, H, K, device=device, dtype=torch.float32)
+        cu = make_cu_seqlens(T, ctx_len, device) if ctx_len else None
+        N = len(cu) - 1 if cu is not None else B
+        init_scale = torch.zeros(N, H, K, device=device, dtype=torch.float32)
 
         t_bl = timed_fwd_bwd(chunk_delta_rule, q1, k1, v1, b1, scale,
-                             use_qk_l2norm_in_kernel=True)
+                             use_qk_l2norm_in_kernel=True, cu_seqlens=cu)
 
         t_osla = timed_fwd_bwd(chunk_osla_delta_rule, q2, k2, v2, b2, scale,
-                               initial_scale=init_scale, use_qk_l2norm_in_kernel=True)
+                               initial_scale=init_scale, use_qk_l2norm_in_kernel=True,
+                               cu_seqlens=cu)
 
         t_osgm = timed_fwd_bwd(chunk_delta_rule_osgm, q3, k3, v3, b3, scale,
                                eta=eta, use_qk_l2norm_in_kernel=True,
-                               use_denominator=use_denom, d_min=d_min, d_max=d_max)
+                               use_denominator=use_denom, d_min=d_min, d_max=d_max,
+                               cu_seqlens=cu)
 
         ratio = t_osgm / t_bl
-        print(f"{label:<25} {t_bl:>8.2f}ms {t_osla:>8.2f}ms {t_osgm:>8.2f}ms {ratio:>9.2f}x")
+        print(f"{label:<40} {t_bl:>8.2f}ms {t_osla:>8.2f}ms {t_osgm:>8.2f}ms {ratio:>7.2f}x")
 
         del q1, k1, v1, b1, q2, k2, v2, b2, q3, k3, v3, b3, init_scale
         torch.cuda.empty_cache()
 
     # ====== Part 3: osgm_phase1 isolated ======
     print()
-    print("=" * 80)
-    print("  OSGM Phase1 (isolated) — to confirm it's NOT the bottleneck")
-    print("=" * 80)
-    print(f"{'Config':<25} {'phase1_fwd':>12} {'l2norm':>12}")
-    print("-" * 52)
+    print("=" * 85)
+    print("  OSGM Phase1 (isolated)")
+    print("=" * 85)
+    print(f"{'Config':<40} {'phase1_fwd':>12} {'l2norm':>12}")
+    print("-" * 67)
 
-    for B, T, label in configs:
+    for B, T, ctx_len, label in all_configs:
         k = torch.randn(B, T, H, K, device=device, dtype=dtype)
         k_norm, _ = l2norm_fwd(k)
 
         t_phase1 = timed_fwd(compute_osgm_phase1_fwd, k_norm, eta, use_denom, d_min, d_max)
         t_l2 = timed_fwd(l2norm_fwd, k)
 
-        print(f"{label:<25} {t_phase1:>10.3f}ms {t_l2:>10.3f}ms")
+        print(f"{label:<40} {t_phase1:>10.3f}ms {t_l2:>10.3f}ms")
 
         del k, k_norm
         torch.cuda.empty_cache()
-
-    # ====== Part 4: torch.profiler trace for T=65536 ======
-    print()
-    print("=" * 80)
-    print("  Generating torch.profiler trace for T=65536 ...")
-    print("=" * 80)
-
-    B, T = 1, 65536
-    q, k, v, beta = make_inputs(B, T, H, K, V, grad=True)
-
-    # warmup
-    for _ in range(3):
-        o = chunk_delta_rule_osgm(q, k, v, beta, scale, eta=eta,
-                                  use_qk_l2norm_in_kernel=True,
-                                  use_denominator=use_denom, d_min=d_min, d_max=d_max)
-        o[0].sum().backward()
-        for a in [q, k, v, beta]:
-            if a.grad is not None:
-                a.grad = None
-
-    with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CUDA],
-        record_shapes=True,
-    ) as prof:
-        o = chunk_delta_rule_osgm(q, k, v, beta, scale, eta=eta,
-                                  use_qk_l2norm_in_kernel=True,
-                                  use_denominator=use_denom, d_min=d_min, d_max=d_max)
-        o[0].sum().backward()
-
-    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=25))
 
 
 if __name__ == "__main__":
