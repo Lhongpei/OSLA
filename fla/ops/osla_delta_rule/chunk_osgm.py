@@ -13,6 +13,7 @@ from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fw
 from fla.ops.osla_delta_rule.wy_fast_osla import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 from fla.ops.osla_delta_rule.chunk_osgm_phase import compute_osgm_phase1_fwd, compute_osgm_phase1_bwd, fused_osgm_bwd_mapping
+
 def chunk_delta_rule_fwd(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, d: torch.Tensor, beta: torch.Tensor, scale: float,
     initial_state: torch.Tensor, output_final_state: bool, cu_seqlens: Optional[torch.LongTensor] = None,
@@ -84,6 +85,8 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.use_denominator = use_denominator; ctx.d_min = d_min; ctx.d_max = d_max
         
+        ctx.has_initial_d = (initial_d is not None)
+        
         return o.to(q.dtype), final_h, final_d
 
     @staticmethod
@@ -99,7 +102,7 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         
         dk_phase1, dd0 = compute_osgm_phase1_bwd(
             k, d, dd, ctx.eta, ctx.use_denominator, ctx.d_min, ctx.d_max, ctx.cu_seqlens,
-            dd_final=dd_final, output_initial_state_gradient=(initial_h is not None)
+            dd_final=dd_final, output_initial_state_gradient=ctx.has_initial_d
         )
         dk = dk_phase2 + dk_phase1
 

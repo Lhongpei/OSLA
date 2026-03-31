@@ -53,7 +53,6 @@ def reference_osgm_delta_rule(
         k_osgm_t = k_osgm[:, t]       
         v_t = v[:, t]                 
         
-        # 修正：适配 [B, T, H] 的 beta，并扩充维度以进行广播
         beta_t = beta[:, t].unsqueeze(-1)  # [B, H, 1]
         
         v_minus = (h @ k_t.unsqueeze(-1)).squeeze(-1)
@@ -80,7 +79,10 @@ def run_recurrent_kernel(q, k, v, beta, scale, eta, h0, use_denom, d_min, d_max)
         use_qk_l2norm_in_kernel=False,
         use_denominator=use_denom, d_min=d_min, d_max=d_max
     )
-    return res[0], res[1][0]
+    # 兼容处理：提取 final_h
+    final_state = res[1]
+    final_h = final_state[0] if isinstance(final_state, tuple) else final_state
+    return res[0], final_h
 
 def run_chunk_kernel(q, k, v, beta, scale, eta, h0, use_denom, d_min, d_max):
     res = chunk_delta_rule_osgm(
@@ -89,7 +91,10 @@ def run_chunk_kernel(q, k, v, beta, scale, eta, h0, use_denom, d_min, d_max):
         use_qk_l2norm_in_kernel=False,
         use_denominator=use_denom, d_min=d_min, d_max=d_max
     )
-    return res[0], res[1]
+    # 兼容处理：安全解包 (final_h, final_d)
+    final_state = res[1]
+    final_h = final_state[0] if isinstance(final_state, tuple) else final_state
+    return res[0], final_h
 
 
 # ===================================================================
@@ -108,10 +113,7 @@ def test_all_osgm_gradients():
     q = torch.randn(B, T, H, K, device='cuda', dtype=torch.float32)
     k = F.normalize(torch.randn(B, T, H, K, device='cuda', dtype=torch.float32), p=2, dim=-1)
     v = torch.randn(B, T, H, V, device='cuda', dtype=torch.float32)
-    
-    # 核心修正：Chunk 架构的 beta 必须是 [B, T, H] (标量门控)！
     beta = torch.rand(B, T, H, device='cuda', dtype=torch.float32).sigmoid()
-    
     h0 = torch.randn(B, H, K, V, device='cuda', dtype=torch.float32)
     
     def clone_inputs():
