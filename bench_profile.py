@@ -166,8 +166,8 @@ def run():
     for B, T, ctx_len, label in all_configs:
         k = torch.randn(B, T, H, K, device=device, dtype=dtype)
         k_norm, _ = l2norm_fwd(k)
-
-        t_phase1 = timed_fwd(compute_osgm_phase1_fwd, k_norm, eta, use_denom, d_min, d_max)
+        cu = make_cu_seqlens(T, ctx_len, device) if ctx_len else None
+        t_phase1 = timed_fwd(compute_osgm_phase1_fwd, k_norm, eta, use_denom, d_min, d_max, cu)
         t_l2 = timed_fwd(l2norm_fwd, k)
 
         print(f"{label:<40} {t_phase1:>10.3f}ms {t_l2:>10.3f}ms")

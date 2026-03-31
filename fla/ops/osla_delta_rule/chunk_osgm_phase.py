@@ -1,26 +1,45 @@
+# -*- coding: utf-8 -*-
+
 import torch
 import triton
 import triton.language as tl
 
 @triton.jit
 def osgm_phase1_fwd_kernel(
-    k_ptr, d_out_ptr, eta, d_min, d_max,
+    k_ptr, d_out_ptr, cu_seqlens_ptr, 
+    initial_d_ptr, final_d_ptr,
+    eta, d_min, d_max,
     stride_kb, stride_kt, stride_kh,
     T: tl.constexpr, H: tl.constexpr, K: tl.constexpr, BK: tl.constexpr,
-    USE_DENOMINATOR: tl.constexpr, USE_PROJECTION: tl.constexpr
+    USE_DENOMINATOR: tl.constexpr, USE_PROJECTION: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    USE_INITIAL_STATE: tl.constexpr, STORE_FINAL_STATE: tl.constexpr
 ):
-    i_bh = tl.program_id(0)
-    i_b = i_bh // H
-    i_h = i_bh % H
+    i_nh = tl.program_id(0)
+    i_n = i_nh // H
+    i_h = i_nh % H
 
-    offset = i_b * stride_kb + i_h * stride_kh + tl.arange(0, BK)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens_ptr + i_n).to(tl.int32)
+        eos = tl.load(cu_seqlens_ptr + i_n + 1).to(tl.int32)
+        i_b = 0
+    else:
+        bos = 0
+        eos = T
+        i_b = i_n
+
+    offset = i_b * stride_kb + bos * stride_kt + i_h * stride_kh + tl.arange(0, BK)
     p_k = k_ptr + offset
     p_d = d_out_ptr + offset
     mask = tl.arange(0, BK) < K
 
-    d_curr = tl.zeros([BK], dtype=tl.float32)
+    if USE_INITIAL_STATE:
+        p_initial_d = initial_d_ptr + i_n * H * K + i_h * K + tl.arange(0, BK)
+        d_curr = tl.load(p_initial_d, mask=mask, other=0.0).to(tl.float32)
+    else:
+        d_curr = tl.zeros([BK], dtype=tl.float32)
 
-    for _ in range(T):
+    for _ in range(bos, eos):
         b_k = tl.load(p_k, mask=mask, other=0.0).to(tl.float32)
         
         tl.store(p_d, d_curr.to(p_d.dtype.element_ty), mask=mask)
@@ -45,28 +64,49 @@ def osgm_phase1_fwd_kernel(
         p_k += stride_kt
         p_d += stride_kt
 
+    if STORE_FINAL_STATE:
+        p_final_d = final_d_ptr + i_n * H * K + i_h * K + tl.arange(0, BK)
+        tl.store(p_final_d, d_curr.to(p_final_d.dtype.element_ty), mask=mask)
+
 
 @triton.jit
 def osgm_phase1_bwd_kernel(
-    k_ptr, d_out_ptr, dd_in_ptr, dk_out_ptr, eta, d_min, d_max,
+    k_ptr, d_out_ptr, dd_in_ptr, dk_out_ptr, cu_seqlens_ptr, 
+    dd_final_ptr, dd_initial_ptr,
+    eta, d_min, d_max,
     stride_kb, stride_kt, stride_kh,
     T: tl.constexpr, H: tl.constexpr, K: tl.constexpr, BK: tl.constexpr,
-    USE_DENOMINATOR: tl.constexpr, USE_PROJECTION: tl.constexpr
+    USE_DENOMINATOR: tl.constexpr, USE_PROJECTION: tl.constexpr,
+    IS_VARLEN: tl.constexpr,
+    USE_FINAL_STATE_GRADIENT: tl.constexpr, STORE_INITIAL_STATE_GRADIENT: tl.constexpr
 ):
-    i_bh = tl.program_id(0)
-    i_b = i_bh // H
-    i_h = i_bh % H
+    i_nh = tl.program_id(0)
+    i_n = i_nh // H
+    i_h = i_nh % H
 
-    offset = i_b * stride_kb + (T - 1) * stride_kt + i_h * stride_kh + tl.arange(0, BK)
+    if IS_VARLEN:
+        bos = tl.load(cu_seqlens_ptr + i_n).to(tl.int32)
+        eos = tl.load(cu_seqlens_ptr + i_n + 1).to(tl.int32)
+        i_b = 0
+    else:
+        bos = 0
+        eos = T
+        i_b = i_n
+
+    offset = i_b * stride_kb + (eos - 1) * stride_kt + i_h * stride_kh + tl.arange(0, BK)
     p_k = k_ptr + offset
     p_d = d_out_ptr + offset
     p_dd = dd_in_ptr + offset
     p_dk = dk_out_ptr + offset
     mask = tl.arange(0, BK) < K
 
-    b_dd_state = tl.zeros([BK], dtype=tl.float32)
+    if USE_FINAL_STATE_GRADIENT:
+        p_dd_final = dd_final_ptr + i_n * H * K + i_h * K + tl.arange(0, BK)
+        b_dd_state = tl.load(p_dd_final, mask=mask, other=0.0).to(tl.float32)
+    else:
+        b_dd_state = tl.zeros([BK], dtype=tl.float32)
 
-    for _ in range(T):
+    for _ in range(bos, eos):
         b_k = tl.load(p_k, mask=mask, other=0.0).to(tl.float32)
         b_d = tl.load(p_d, mask=mask, other=0.0).to(tl.float32)
         b_dd_curr = tl.load(p_dd, mask=mask, other=0.0).to(tl.float32)
@@ -103,39 +143,57 @@ def osgm_phase1_bwd_kernel(
         p_d -= stride_kt
         p_dd -= stride_kt
         p_dk -= stride_kt
+        
+    if STORE_INITIAL_STATE_GRADIENT:
+        p_dd_initial = dd_initial_ptr + i_n * H * K + i_h * K + tl.arange(0, BK)
+        tl.store(p_dd_initial, b_dd_state.to(p_dd_initial.dtype.element_ty), mask=mask)
 
-
-def compute_osgm_phase1_fwd(k: torch.Tensor, eta: float, use_denominator: bool, d_min: float, d_max: float):
+def compute_osgm_phase1_fwd(k: torch.Tensor, eta: float, use_denominator: bool, d_min: float, d_max: float, cu_seqlens: torch.Tensor = None, initial_d: torch.Tensor = None, output_final_state: bool = False):
     B, T, H, K = k.shape
+    BK = triton.next_power_of_2(K)
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    
     d_out = torch.empty_like(k)
-    BK = triton.next_power_of_2(K)
-    USE_PROJECTION = (d_min is not None) and (d_max is not None)
-    d_min_val = float(d_min) if d_min is not None else 0.0
-    d_max_val = float(d_max) if d_max is not None else 0.0
-    
-    osgm_phase1_fwd_kernel[(B * H,)](
-        k, d_out, eta, d_min_val, d_max_val,
-        k.stride(0), k.stride(1), k.stride(2),
-        T, H, K, BK,
-        USE_DENOMINATOR=use_denominator, USE_PROJECTION=USE_PROJECTION
-    )
-    return d_out
+    final_d = torch.empty(N, H, K, device=k.device, dtype=k.dtype) if output_final_state else None
 
-def compute_osgm_phase1_bwd(k: torch.Tensor, d_out: torch.Tensor, dd_in: torch.Tensor, eta: float, use_denominator: bool, d_min: float, d_max: float):
-    B, T, H, K = k.shape
-    dk_out = torch.empty_like(k)
-    BK = triton.next_power_of_2(K)
-    USE_PROJECTION = (d_min is not None) and (d_max is not None)
-    d_min_val = float(d_min) if d_min is not None else 0.0
-    d_max_val = float(d_max) if d_max is not None else 0.0
-    
-    osgm_phase1_bwd_kernel[(B * H,)](
-        k, d_out, dd_in, dk_out, eta, d_min_val, d_max_val,
+    osgm_phase1_fwd_kernel[(N * H,)](
+        k, d_out, cu_seqlens, 
+        initial_d, final_d,
+        eta, d_min or 0.0, d_max or 0.0,
         k.stride(0), k.stride(1), k.stride(2),
         T, H, K, BK,
-        USE_DENOMINATOR=use_denominator, USE_PROJECTION=USE_PROJECTION
+        USE_DENOMINATOR=use_denominator, 
+        USE_PROJECTION=(d_min is not None and d_max is not None),
+        IS_VARLEN=(cu_seqlens is not None),
+        USE_INITIAL_STATE=(initial_d is not None),
+        STORE_FINAL_STATE=output_final_state,
+        num_warps=1, num_stages=1
     )
-    return dk_out
+    return d_out, final_d
+
+
+def compute_osgm_phase1_bwd(k: torch.Tensor, d_out: torch.Tensor, dd_in: torch.Tensor, eta: float, use_denominator: bool, d_min: float, d_max: float, cu_seqlens: torch.Tensor = None, dd_final: torch.Tensor = None, output_initial_state_gradient: bool = False):
+    B, T, H, K = k.shape
+    BK = triton.next_power_of_2(K)
+    N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
+    
+    dk_out = torch.empty_like(k)
+    dd_initial = torch.empty(N, H, K, device=k.device, dtype=k.dtype) if output_initial_state_gradient else None
+    
+    osgm_phase1_bwd_kernel[(N * H,)](
+        k, d_out, dd_in, dk_out, cu_seqlens, 
+        dd_final, dd_initial,
+        eta, d_min or 0.0, d_max or 0.0,
+        k.stride(0), k.stride(1), k.stride(2),
+        T, H, K, BK,
+        USE_DENOMINATOR=use_denominator, 
+        USE_PROJECTION=(d_min is not None and d_max is not None),
+        IS_VARLEN=(cu_seqlens is not None),
+        USE_FINAL_STATE_GRADIENT=(dd_final is not None),
+        STORE_INITIAL_STATE_GRADIENT=output_initial_state_gradient,
+        num_warps=1, num_stages=1
+    )
+    return dk_out, dd_initial
 
 @triton.jit
 def fused_osgm_bwd_mapping_kernel(
