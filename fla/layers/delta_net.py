@@ -16,6 +16,8 @@ from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
 from fla.ops.osla_delta_rule.fused_recurrent import fused_recurrent_delta_rule as fused_recurrent_delta_rule_osla
 from fla.ops.osla_delta_rule.chunk import chunk_osla_delta_rule
+from fla.ops.osla_delta_rule.fused_recurrent_osgm import fused_recurrent_delta_rule_osgm
+from fla.ops.osla_delta_rule.chunk_osgm import chunk_delta_rule_osgm
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -91,6 +93,11 @@ class DeltaNet(nn.Module):
         qk_norm: str = 'l2',
         norm_eps: float = 1e-5,
         use_osla: bool = False,
+        use_osgm: bool = False,
+        osgm_eta: float = None,
+        osgm_use_denominator: bool = None,
+        osgm_d_min: float = None,
+        osgm_d_max: float = None,
         **kwargs
     ) -> DeltaNet:
         super().__init__()
@@ -99,6 +106,11 @@ class DeltaNet(nn.Module):
         self.qk_activation = qk_activation
         self.qk_norm = qk_norm
         self.use_osla = use_osla
+        self.use_osgm = use_osgm
+        self.osgm_eta = osgm_eta
+        self.osgm_use_denominator = osgm_use_denominator
+        self.osgm_d_min = osgm_d_min
+        self.osgm_d_max = osgm_d_max
 
         assert self.qk_activation in ['silu', 'relu', 'elu', 'identity']
         assert self.qk_norm in ['l2', 'sum']
@@ -167,7 +179,7 @@ class DeltaNet(nn.Module):
 
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
-        if use_osla:
+        if use_osla or use_osgm:
             self.initial_scale = nn.Parameter(torch.zeros(num_heads, self.head_k_dim))
 
     def forward(
@@ -178,6 +190,7 @@ class DeltaNet(nn.Module):
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
         use_osla = False,
+        use_osgm = False,
         **kwargs: Unpack[Dict]
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
         if attention_mask is not None:
@@ -252,13 +265,30 @@ class DeltaNet(nn.Module):
             beta = beta * 2.
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        if use_osla:
+        use_l2norm = self.qk_norm == 'l2'
+        if use_osla or use_osgm:
             intial_state, initial_scale = recurrent_state if recurrent_state is not None else (None, None)
             if initial_scale is None:
                 N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
                 initial_scale = self.initial_scale.unsqueeze(0).expand(N, -1, -1).contiguous().float()
         if mode == 'fused_recurrent':
-            if use_osla:
+            if use_osgm:
+                o, recurrent_state = fused_recurrent_delta_rule_osgm(
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    eta=self.osgm_eta,
+                    initial_state=intial_state,
+                    initial_scale=initial_scale,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=use_l2norm,
+                    use_denominator=self.osgm_use_denominator,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                )
+            elif use_osla:
                 o, recurrent_state = fused_recurrent_delta_rule_osla(
                     q=q,
                     k=k,
@@ -268,7 +298,7 @@ class DeltaNet(nn.Module):
                     initial_scale=initial_scale,
                     output_final_state=use_cache,
                     cu_seqlens=cu_seqlens,
-                    use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
+                    use_qk_l2norm_in_kernel=use_l2norm,
                 )
             else:
                 o, recurrent_state = fused_recurrent_delta_rule(
@@ -279,10 +309,28 @@ class DeltaNet(nn.Module):
                     initial_state=recurrent_state,
                     output_final_state=use_cache,
                     cu_seqlens=cu_seqlens,
-                    use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
+                    use_qk_l2norm_in_kernel=use_l2norm,
                 )
         elif mode == 'chunk':
-            if use_osla:
+            if use_osgm:
+                o, recurrent_state = chunk_delta_rule_osgm(
+                    q=q,
+                    k=k,
+                    v=v,
+                    beta=beta,
+                    eta=self.osgm_eta,
+                    initial_state=intial_state,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=use_l2norm,
+                    use_denominator=self.osgm_use_denominator,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                )
+                # chunk_osgm doesn't use initial_scale, but the param must participate
+                # in the computation graph for DDP (fused_recurrent fallback needs it)
+                o = o + (self.initial_scale.sum() * 0).to(o.dtype)
+            elif use_osla:
                 o, recurrent_state = chunk_osla_delta_rule(
                     q=q,
                     k=k,
@@ -292,7 +340,7 @@ class DeltaNet(nn.Module):
                     initial_scale=initial_scale,
                     output_final_state=use_cache,
                     cu_seqlens=cu_seqlens,
-                    use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
+                    use_qk_l2norm_in_kernel=use_l2norm,
                 )
             else:
                 o, recurrent_state = chunk_delta_rule(
@@ -303,7 +351,7 @@ class DeltaNet(nn.Module):
                     initial_state=recurrent_state,
                     output_final_state=use_cache,
                     cu_seqlens=cu_seqlens,
-                    use_qk_l2norm_in_kernel=True if self.qk_norm == 'l2' else False
+                    use_qk_l2norm_in_kernel=use_l2norm,
                 )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")

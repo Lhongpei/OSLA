@@ -1,5 +1,5 @@
 #!/bin/bash
-# OSLA 340M fused_recurrent mode on 8xH100
+# OSLA-OSGM 340M fused_recurrent mode on 8xH100
 
 set -e
 
@@ -13,10 +13,10 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_P2P_LEVEL=NVL
 export NCCL_P2P_DISABLE=0
 export WANDB_PROJECT=osla_vs_deltanet
-export WANDB_NAME=deltanet-340M-osla-fused-recurrent
+export WANDB_NAME=deltanet-340M-osla-osgm-fused-recurrent
 
-DUMP=/home/datagen/OSLA/experiments/osla_340M/exp/deltanet-340M-osla-fused-recurrent
-CONFIG=/home/datagen/OSLA/experiments/osla_340M/configs/osla.json
+DUMP=/home/datagen/OSLA/experiments/osla_340M/exp/deltanet-340M-osla-osgm-fused-recurrent
+CONFIG=/home/datagen/OSLA/experiments/osla_340M/configs/osla_osgm.json
 TOKENIZER=fla-hub/delta_net-1.3B-100B
 
 mkdir -p $DUMP/logs
@@ -27,7 +27,7 @@ PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 /home/datagen/anaconda3/envs/osla/bin/torchrun --nnodes=1 \
   --nproc_per_node=8 \
   --rdzv_backend c10d \
-  --rdzv_endpoint "localhost:29502" \
+  --rdzv_endpoint "localhost:29503" \
   --local-ranks-filter 0 \
   --role rank \
   --tee 3 \
@@ -66,4 +66,4 @@ PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
   --checkpoint.keep_latest_k 2 \
   --metrics.log_freq 1
 
-echo "OSLA fused_recurrent training finished!"
+echo "OSLA-OSGM fused_recurrent training finished!"

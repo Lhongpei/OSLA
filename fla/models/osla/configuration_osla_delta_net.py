@@ -42,6 +42,11 @@ class OSLAConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
+        use_osgm: bool = False,
+        osgm_eta: float = None,
+        osgm_use_denominator: bool = None,
+        osgm_d_min: float = None,
+        osgm_d_max: float = None,
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -71,6 +76,11 @@ class OSLAConfig(PretrainedConfig):
         self.fuse_cross_entropy = fuse_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+        self.use_osgm = use_osgm
+        self.osgm_eta = osgm_eta
+        self.osgm_use_denominator = osgm_use_denominator
+        self.osgm_d_min = osgm_d_min
+        self.osgm_d_max = osgm_d_max
 
         if attn is not None:
             if not isinstance(attn, Dict):

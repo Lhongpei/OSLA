@@ -65,7 +65,12 @@ class OSLABlock(nn.Module):
                 qk_activation=config.qk_activation,
                 norm_eps=config.norm_eps,
                 layer_idx=layer_idx,
-                use_osla=True,
+                use_osla=not getattr(config, 'use_osgm', False),
+                use_osgm=getattr(config, 'use_osgm', False),
+                osgm_eta=getattr(config, 'osgm_eta', None),
+                osgm_use_denominator=getattr(config, 'osgm_use_denominator', None),
+                osgm_d_min=getattr(config, 'osgm_d_min', None),
+                osgm_d_max=getattr(config, 'osgm_d_max', None),
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = DeltaNetMLP(
@@ -93,7 +98,8 @@ class OSLABlock(nn.Module):
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            use_osla=True,
+            use_osla=not getattr(self.config, 'use_osgm', False),
+            use_osgm=getattr(self.config, 'use_osgm', False),
             **kwargs
         )
         if self.config.fuse_norm:

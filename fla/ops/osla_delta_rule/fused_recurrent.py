@@ -108,6 +108,7 @@ def fused_recurrent_delta_rule_bwd_kernel(
     scale_0, d_scale_0, cu_seqlens, scale,
     B: tl.constexpr, T, H: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
     BK: tl.constexpr, BV: tl.constexpr, NK: tl.constexpr,
+    NH: tl.constexpr,
     IS_BETA_HEADWISE: tl.constexpr, USE_INITIAL_STATE: tl.constexpr,
     USE_FINAL_STATE_GRADIENT: tl.constexpr, IS_VARLEN: tl.constexpr,
 ):
@@ -260,8 +261,8 @@ def fused_recurrent_delta_rule_bwd_kernel(
         tl.store(p_dh0, b_dh.to(p_dh0.dtype.element_ty), mask=mask_k[:, None] & mask_v[None, :])
 
     # Store dL/dD_0 (accumulated preconditioner gradient)
-    # b_dd is [BK], one per V-block (i_v). Sum across V-blocks happens outside.
-    p_ds0 = d_scale_0 + (i_v * (B if not IS_VARLEN else 1) * H + i_n * H + i_h) * K + i_k * BK + tl.arange(0, BK)
+    # d_scale_0 shape: [NV, NH, K], indexed by (i_v, i_nh, i_k)
+    p_ds0 = d_scale_0 + (i_v * NH + i_nh) * K + i_k * BK + tl.arange(0, BK)
     tl.store(p_ds0, b_dd.to(p_ds0.dtype.element_ty), mask=mask_k)
 
     tl.debug_barrier()
@@ -421,8 +422,7 @@ def fused_recurrent_delta_rule_bwd(
     else:
         dh0 = None
 
-    # d_scale_0: gradient of initial_scale, shape [NV, N, H, K] (sum over NV blocks later)
-    d_scale_0 = q.new_empty(NV, N, H, K, dtype=torch.float32)
+    d_scale_0 = q.new_empty(NV, N * H, K, dtype=torch.float32)
 
     fused_recurrent_delta_rule_bwd_kernel[grid](
         q,
@@ -449,6 +449,7 @@ def fused_recurrent_delta_rule_bwd(
         BK=BK,
         BV=BV,
         NK=NK,
+        NH=N*H,
         IS_BETA_HEADWISE=beta_vector,
         num_warps=num_warps,
         num_stages=num_stages
@@ -457,7 +458,7 @@ def fused_recurrent_delta_rule_bwd(
     dk = dk.sum(0)
     dv = dv.sum(0)
     db = db.sum((0, 1)) if beta_vector else db.sum(0)
-    d_scale_0 = d_scale_0.sum(0)
+    d_scale_0 = d_scale_0.sum(0).view(N, H, K)  # [NV, N*H, K] → sum over NV → [N*H, K] → [N, H, K]
 
     return dq, dk, dv, db, dh0, d_scale_0
 
