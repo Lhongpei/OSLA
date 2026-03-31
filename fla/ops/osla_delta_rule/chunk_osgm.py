@@ -12,7 +12,7 @@ from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_g
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.osla_delta_rule.wy_fast_osla import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
-from fla.ops.osla_delta_rule.chunk_osgm_phase import compute_osgm_phase1_fwd, compute_osgm_phase1_bwd
+from fla.ops.osla_delta_rule.chunk_osgm_phase import compute_osgm_phase1_fwd, compute_osgm_phase1_bwd, fused_osgm_bwd_mapping
 def chunk_delta_rule_fwd(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -77,12 +77,7 @@ def chunk_delta_rule_bwd(
         k=k, v=v, beta=beta, A=A, d=d, dw=dw, du=dv, cu_seqlens=cu_seqlens
     )
     
-    total_dkw = dkw + dkw_from_A
-    
-    dd = total_dkw * k
-    dk_from_kw = total_dkw * d
-    
-    dk = dk_from_kw + dk_read
+    dk, dd = fused_osgm_bwd_mapping(dkw, dkw_from_A, k, d, dk_read)
     
     return dq, dk, dv, db, dh0, dd
 

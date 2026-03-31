@@ -136,3 +136,48 @@ def compute_osgm_phase1_bwd(k: torch.Tensor, d_out: torch.Tensor, dd_in: torch.T
         USE_DENOMINATOR=use_denominator, USE_PROJECTION=USE_PROJECTION
     )
     return dk_out
+
+@triton.jit
+def fused_osgm_bwd_mapping_kernel(
+    dkw_ptr, dkw_A_ptr, k_ptr, d_ptr, dk_read_ptr,
+    dk_out_ptr, dd_out_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr
+):
+    pid = tl.program_id(axis=0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    dkw = tl.load(dkw_ptr + offsets, mask=mask)
+    dkw_A = tl.load(dkw_A_ptr + offsets, mask=mask)
+    k = tl.load(k_ptr + offsets, mask=mask)
+    d = tl.load(d_ptr + offsets, mask=mask)
+    dk_read = tl.load(dk_read_ptr + offsets, mask=mask)
+
+    total_dkw = dkw + dkw_A
+    dd_out = total_dkw * k
+    dk_out = total_dkw * d + dk_read
+
+    tl.store(dk_out_ptr + offsets, dk_out, mask=mask)
+    tl.store(dd_out_ptr + offsets, dd_out, mask=mask)
+
+def fused_osgm_bwd_mapping(dkw, dkw_A, k, d, dk_read):
+    dkw = dkw.contiguous()
+    dkw_A = dkw_A.contiguous()
+    k = k.contiguous()
+    d = d.contiguous()
+    dk_read = dk_read.contiguous()
+
+    dk_out = torch.empty_like(k)
+    dd_out = torch.empty_like(d)
+    
+    n_elements = k.numel()
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+    
+    fused_osgm_bwd_mapping_kernel[grid](
+        dkw, dkw_A, k, d, dk_read,
+        dk_out, dd_out,
+        n_elements,
+        BLOCK_SIZE=1024
+    )
+    return dk_out, dd_out
