@@ -70,7 +70,7 @@ def main():
                            help='Block size')
     ppl_parser.add_argument('--bucket_size', type=int, default=2048,
                            help='Bucket size')
-    ppl_parser.add_argument('--batch_size', type=int, default=1,
+    ppl_parser.add_argument('--batch_size', type=int, default=32,
                            help='Batch size')
     ppl_parser.add_argument('--device', type=str, default=None,
                            help='Device type')

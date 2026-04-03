@@ -1,16 +1,18 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import json
 import math
+import os
 from functools import partial
 from typing import Any, Dict, Iterator, List
 
 import torch
+import torch.distributed as dist
+import torch.nn.functional as F
 from datasets import Dataset, load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
-
-from fla.modules.fused_cross_entropy import FusedCrossEntropyLoss
 
 
 class PerplexityEvaluator:
@@ -29,7 +31,6 @@ class PerplexityEvaluator:
         self.block_size = block_size
         self.bucket_size = bucket_size
         self.batch_size = batch_size
-        self.loss_fct = FusedCrossEntropyLoss(reduction='sum')
 
     @staticmethod
     def preprocess(
@@ -37,7 +38,6 @@ class PerplexityEvaluator:
         tokenizer: PreTrainedTokenizer,
         column_name: str = 'text'
     ) -> Dict[str, List[List[int]]]:
-        """Preprocess text data"""
         tokenized = tokenizer(examples[column_name])
         return {
             'input_ids': tokenized['input_ids'],
@@ -45,26 +45,21 @@ class PerplexityEvaluator:
         }
 
     def batchify(self, dataset: Dataset, tokens_per_batch: int) -> Iterator[List[torch.Tensor]]:
-        """Split dataset into batches of exactly block_size length"""
-        current_tokens = []  # Buffer to store all tokens
+        current_tokens = []
 
         for sentence in dataset:
-            # Convert input_ids to list and add to buffer
             tokens = sentence['input_ids'].tolist() if torch.is_tensor(sentence['input_ids']) else list(sentence['input_ids'])
             if not tokens:
                 continue
             current_tokens.extend(tokens)
 
-            # When we have enough tokens, yield batches
             while len(current_tokens) >= self.block_size * self.batch_size:
                 batch = []
                 for _ in range(self.batch_size):
-                    # Extract exactly block_size tokens
                     batch.append(torch.tensor(current_tokens[:self.block_size], dtype=torch.long))
                     current_tokens = current_tokens[self.block_size:]
                 yield batch
 
-        # Handle remaining tokens if they form complete blocks
         if len(current_tokens) >= self.block_size:
             remaining_batches = len(current_tokens) // self.block_size
             remaining_batches = min(remaining_batches, self.batch_size)
@@ -76,91 +71,73 @@ class PerplexityEvaluator:
                 yield batch
 
     def process_batch(self, batch: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Process a single batch of data"""
-        # Stack the tensors - no need for padding since all sequences are block_size
         input_ids = torch.stack(batch).to(self.device)
 
-        # Calculate number of blocks for each sequence
-        blocks = [
-            (self.block_size-1)//self.bucket_size
-            for _ in range(input_ids.shape[0])
-        ]
+        # Forward pass without labels to avoid redundant loss computation
+        outputs = self.model(input_ids)
+        # logits: (B, T, V), shift to get next-token predictions
+        # shift logits and labels for next-token prediction
+        logits = outputs['logits'][:, :-1]  # (B, T-1, V)
+        targets = input_ids[:, 1:]          # (B, T-1)
 
-        # Prepare labels
-        labels = input_ids.clone()
-
-        # Forward pass
-        outputs = self.model(input_ids, labels=labels)
-
-        # Calculate next token prediction labels
-        next_token_labels = torch.cat((
-            input_ids[..., 1:],
-            torch.full_like(input_ids[:, :1], self.tokenizer.eos_token_id)
-        ), -1)
-
-        # Calculate negative log likelihood
-        nlls = (-outputs['logits'].log_softmax(-1)).gather(-1, next_token_labels.unsqueeze(-1)).squeeze(-1)
+        # Per-token NLL via cross_entropy (single softmax, no redundancy)
+        nlls = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            targets.reshape(-1),
+            reduction='none'
+        ).reshape(targets.shape)  # (B, T-1)
 
         return {
-            'input_ids': input_ids,
-            'loss': outputs['loss'],
             'nlls': nlls,
-            'labels': next_token_labels,
-            'blocks': blocks
+            'num_tokens': targets.shape[0] * targets.shape[1],
         }
 
-    def evaluate(self, dataset: Dataset) -> Dict[str, Any]:
-        """Evaluate perplexity on the entire dataset"""
-        total_loss = 0
-        total_tokens = 0
-        total_sentences = 0
+    def evaluate(self, dataset: Dataset, rank: int = 0, world_size: int = 1) -> Dict[str, Any]:
+        total_tokens = torch.tensor(0, dtype=torch.long, device=self.device)
+        total_sentences = torch.tensor(0, dtype=torch.long, device=self.device)
 
-        # Initialize block statistics
         num_blocks = (self.block_size - 1) // self.bucket_size + 1
-        block_loss = [torch.tensor(0., dtype=torch.float, device=self.device) for _ in range(num_blocks)]
-        block_tokens = [1e-10 for _ in range(num_blocks)]
-        bucket_sizes = [0 for _ in range(num_blocks)]
+        block_loss = [torch.tensor(0., dtype=torch.float64, device=self.device) for _ in range(num_blocks)]
+        block_tokens = [torch.tensor(0, dtype=torch.long, device=self.device) for _ in range(num_blocks)]
 
-        # Create progress bar
-        bar = tqdm(self.batchify(dataset, self.block_size))
+        if world_size > 1:
+            indices = list(range(rank, len(dataset), world_size))
+            dataset = dataset.select(indices)
+
+        bar = tqdm(self.batchify(dataset, self.block_size), disable=(rank != 0))
 
         for batch in bar:
             batch_outputs = self.process_batch(batch)
-            input_ids = batch_outputs['input_ids']
+            nlls = batch_outputs['nlls']  # (B, T-1)
+            B = nlls.shape[0]
 
-            nlls = batch_outputs['nlls']
-            labels = batch_outputs['labels']
-            blocks = batch_outputs['blocks']
+            total_tokens += batch_outputs['num_tokens']
+            total_sentences += B
 
-            # Update statistics
-            total_tokens += input_ids.ne(self.loss_fct.ignore_index).sum()
-            total_sentences += input_ids.shape[0]
-            print(input_ids.shape[1])
+            # Accumulate block-level NLL
+            # nlls is (B, T-1) where T = block_size, so T-1 tokens per sequence
+            for i, j in enumerate(range(0, self.block_size - 1, self.bucket_size)):
+                end = min(j + self.bucket_size, nlls.shape[1])
+                block_loss[i] += nlls[:, j:end].sum().double()
+                block_tokens[i] += B * (end - j)
 
-            for i in blocks:
-                bucket_sizes[i] += 1
+            if rank == 0:
+                ppls = [f"{math.exp(min(bl.item() / max(bt.item(), 1), 20)):6.2f}" for bl, bt in zip(block_loss, block_tokens)]
+                bar.set_description_str(f"[{total_tokens.item():10} tokens, {total_sentences.item():8} sentences] " + ' '.join(ppls))
 
-            # Calculate block-level loss
-            for i, j in enumerate(range(0, min(input_ids.shape[-1], self.block_size), self.bucket_size)):
-                block_loss[i] += nlls[:, j:j+self.bucket_size].sum()
-                block_tokens[i] += labels[:, j:j+self.bucket_size].ne(self.loss_fct.ignore_index).sum()
+        if world_size > 1:
+            for t in [total_tokens, total_sentences] + block_loss + block_tokens:
+                dist.all_reduce(t, op=dist.ReduceOp.SUM)
 
-            # Update total loss
-            total_loss += batch_outputs['loss'].item() * labels.ne(self.loss_fct.ignore_index).sum()
-
-            # Update progress bar
-            ppls = [f"{math.exp(loss / toks):6.2f}" for loss, toks in zip(block_loss, block_tokens)]
-            bar.set_description_str(f"[{total_tokens:10} tokens, {total_sentences:8} sentences] " + ' '.join(ppls))
-
-        # Calculate final results
-        final_ppl = math.exp(total_loss / total_tokens)
-        block_ppls = [math.exp(loss / toks) for loss, toks in zip(block_loss, block_tokens)]
+        total_nll = sum(bl.item() for bl in block_loss)
+        final_ppl = math.exp(total_nll / total_tokens.item())
+        block_ppls = [math.exp(bl.item() / max(bt.item(), 1)) for bl, bt in zip(block_loss, block_tokens)]
 
         return {
             'perplexity': final_ppl,
             'block_perplexities': block_ppls,
-            'total_tokens': total_tokens,
-            'total_sentences': total_sentences
+            'total_tokens': total_tokens.item(),
+            'total_sentences': total_sentences.item()
         }
 
 
@@ -168,44 +145,51 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate perplexity")
     parser.add_argument('-p', '--path', type=str, default='fla-hub/gla-1.3B-100B')
     parser.add_argument('-d', '--data', type=str, default='fla-hub/pg19')
-    parser.add_argument('-s', '--split', type=str, default='train')
+    parser.add_argument('-s', '--split', type=str, default='test')
     parser.add_argument('-n', '--column_name', type=str, default='text')
     parser.add_argument('--block_size', type=int, default=28672)
     parser.add_argument('--bucket_size', type=int, default=2048)
-    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--device', type=str, default=None)
+    parser.add_argument('--output', type=str, default=None)
     args = parser.parse_args()
 
-    # Set device and random seed
-    if args.device is None:
-        from fla.utils import device
+    rank = int(os.environ.get('RANK', 0))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    local_rank = int(os.environ.get('LOCAL_RANK', 0))
+
+    if world_size > 1:
+        dist.init_process_group(backend='nccl')
+        device = f'cuda:{local_rank}'
     else:
-        device = args.device
+        if args.device is None:
+            from fla.utils import device
+        else:
+            device = args.device
+
     torch.manual_seed(0)
 
-    # Load model and tokenizer
-    print(f"Loading model {args.path}")
+    if rank == 0:
+        print(f"Loading model {args.path}")
     tokenizer = AutoTokenizer.from_pretrained(args.path)
     model = AutoModelForCausalLM.from_pretrained(
         args.path,
         device_map={"": device}
     ).bfloat16().eval()
-    print(f"{model}")
 
-    # Load dataset
-    print(f"Loading data {args.data}")
+    if rank == 0:
+        print(f"Loading data {args.data} (split={args.split})")
     dataset = load_dataset(args.data, split=args.split)
     dataset = dataset.map(
         partial(PerplexityEvaluator.preprocess, tokenizer=tokenizer, column_name=args.column_name),
         batched=True,
         num_proc=32
     )
-    print(dataset)
-    print("batch_size", args.batch_size,
-          "block_size", args.block_size,
-          "total_tokens_per_batch", args.batch_size * args.block_size)
 
-    # Create evaluator and run evaluation
+    if rank == 0:
+        print(dataset)
+        print(f"batch_size={args.batch_size}, block_size={args.block_size}, bucket_size={args.bucket_size}")
+
     evaluator = PerplexityEvaluator(
         model=model,
         tokenizer=tokenizer,
@@ -216,16 +200,24 @@ def main():
     )
 
     with torch.no_grad():
-        results = evaluator.evaluate(dataset)
+        results = evaluator.evaluate(dataset, rank=rank, world_size=world_size)
 
-    # Print results
-    print("\nEvaluation Results:")
-    print(f"Final Perplexity: {results['perplexity']:.2f}")
-    print(f"Total Tokens: {results['total_tokens']}")
-    print(f"Total Sentences: {results['total_sentences']}")
-    print("\nBlock-wise Perplexities:")
-    for i, ppl in enumerate(results['block_perplexities']):
-        print(f"Block {i}: {ppl:.2f}")
+    if rank == 0:
+        print("\nEvaluation Results:")
+        print(f"Final Perplexity: {results['perplexity']:.2f}")
+        print(f"Total Tokens: {results['total_tokens']}")
+        print(f"Total Sentences: {results['total_sentences']}")
+        print("\nBlock-wise Perplexities:")
+        for i, ppl in enumerate(results['block_perplexities']):
+            print(f"Block {i}: {ppl:.2f}")
+
+        if args.output:
+            with open(args.output, 'w') as f:
+                json.dump(results, f, indent=2)
+            print(f"\nResults saved to {args.output}")
+
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

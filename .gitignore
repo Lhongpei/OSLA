@@ -35,8 +35,8 @@ __pycache__
 *.pt
 *.safetensors
 
-# allow experiment configs, scripts, and reports
-!experiments/**
+# experiment configs, scripts, and eval results are tracked by default;
+# model outputs under exp/ are excluded by the 'exp' rule above.
 
 # vscode
 .vscode

@@ -319,7 +319,7 @@ class DeltaNet(nn.Module):
                     v=v,
                     beta=beta,
                     eta=self.osgm_eta,
-                    initial_state=intial_state,
+                    initial_state=(intial_state, initial_scale),
                     output_final_state=use_cache,
                     cu_seqlens=cu_seqlens,
                     use_qk_l2norm_in_kernel=use_l2norm,
@@ -327,9 +327,6 @@ class DeltaNet(nn.Module):
                     d_min=self.osgm_d_min,
                     d_max=self.osgm_d_max,
                 )
-                # chunk_osgm doesn't use initial_scale, but the param must participate
-                # in the computation graph for DDP (fused_recurrent fallback needs it)
-                o = o + (self.initial_scale.sum() * 0).to(o.dtype)
             elif use_osla:
                 o, recurrent_state = chunk_osla_delta_rule(
                     q=q,
