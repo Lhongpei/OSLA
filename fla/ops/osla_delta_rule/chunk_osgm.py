@@ -12,7 +12,17 @@ from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_g
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
 from fla.ops.osla_delta_rule.wy_fast_osla import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
-from fla.ops.osla_delta_rule.chunk_osgm_phase import compute_osgm_phase1_fwd, compute_osgm_phase1_bwd, fused_osgm_bwd_mapping
+
+from fla.ops.osla_delta_rule.chunk_osgm_phase import (
+    compute_osgm_phase1_fwd as compute_osgm_phase1_fwd_rec, 
+    compute_osgm_phase1_bwd as compute_osgm_phase1_bwd_rec,
+    fused_osgm_bwd_mapping
+)
+
+from fla.ops.osla_delta_rule.chunk_osgm_phase_wy import (
+    compute_osgm_phase1_fwd_wy,
+    compute_osgm_phase1_bwd_wy
+)
 
 def chunk_delta_rule_fwd(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, d: torch.Tensor, beta: torch.Tensor, scale: float,
@@ -61,7 +71,8 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
     @autocast_custom_fwd
     def forward(
         ctx, q, k, v, beta, scale, eta, initial_h, initial_d, output_final_state,
-        use_qk_l2norm_in_kernel, cu_seqlens, use_denominator, d_min, d_max, 
+        use_qk_l2norm_in_kernel, cu_seqlens, use_denominator, d_min, d_max,
+        use_wy_fast
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -69,9 +80,16 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
 
-        d, final_d = compute_osgm_phase1_fwd(
-            k, eta, use_denominator, d_min, d_max, cu_seqlens, initial_d, output_final_state
-        )
+        if use_wy_fast:
+            d, final_d, W, d_starts_bh = compute_osgm_phase1_fwd_wy(
+                k, eta, use_denominator, d_min, d_max, cu_seqlens, initial_d, output_final_state
+            )
+            extra_tensors = (W, d_starts_bh)
+        else:
+            d, final_d = compute_osgm_phase1_fwd_rec(
+                k, eta, use_denominator, d_min, d_max, cu_seqlens, initial_d, output_final_state
+            )
+            extra_tensors = ()
 
         o, A, final_h = chunk_delta_rule_fwd(
             q=q, k=k, v=v, d=d, beta=beta, scale=scale,
@@ -80,12 +98,13 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
         )
         
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, d, beta, A, initial_h)
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, d, beta, A, initial_h, *extra_tensors)
+        
         ctx.scale = scale; ctx.eta = eta; ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         ctx.use_denominator = use_denominator; ctx.d_min = d_min; ctx.d_max = d_max
-        
         ctx.has_initial_d = (initial_d is not None)
+        ctx.use_wy_fast = use_wy_fast
         
         return o.to(q.dtype), final_h, final_d
 
@@ -93,24 +112,34 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dh_final, dd_final):
-        q, q_rstd, k, k_rstd, v, d, beta, A, initial_h = ctx.saved_tensors
+        saved = ctx.saved_tensors
+        q, q_rstd, k, k_rstd, v, d, beta, A, initial_h = saved[:9]
+        extra_tensors = saved[9:]
 
         dq, dk_phase2, dv, db, dh0, dd = chunk_delta_rule_bwd(
             q=q, k=k, v=v, d=d, beta=beta, A=A, scale=ctx.scale,
             initial_state=initial_h, do=do, dht=dh_final, cu_seqlens=ctx.cu_seqlens
         )
         
-        dk_phase1, dd0 = compute_osgm_phase1_bwd(
-            k, d, dd, ctx.eta, ctx.use_denominator, ctx.d_min, ctx.d_max, ctx.cu_seqlens,
-            dd_final=dd_final, output_initial_state_gradient=ctx.has_initial_d
-        )
+        if ctx.use_wy_fast:
+            W, d_starts_bh = extra_tensors
+            dk_phase1, dd0 = compute_osgm_phase1_bwd_wy(
+                k, d, dd, ctx.eta, ctx.use_denominator, ctx.d_min, ctx.d_max, ctx.cu_seqlens,
+                dd_final, ctx.has_initial_d, W, d_starts_bh
+            )
+        else:
+            dk_phase1, dd0 = compute_osgm_phase1_bwd_rec(
+                k, d, dd, ctx.eta, ctx.use_denominator, ctx.d_min, ctx.d_max, ctx.cu_seqlens,
+                dd_final=dd_final, output_initial_state_gradient=ctx.has_initial_d
+            )
+            
         dk = dk_phase2 + dk_phase1
 
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
             
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, None, dh0, dd0, None, None, None, None, None, None
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, None, dh0, dd0, None, None, None, None, None, None, None
 
 
 @torch.compiler.disable
@@ -124,6 +153,7 @@ def chunk_delta_rule_osgm(
     d_min: float = None,
     d_max: float = None,
     head_first: bool = False,
+    use_wy_fast: bool = False,
 ):
     if use_qk_l2norm_in_kernel:
         if eta is None: eta = 1.0
@@ -146,7 +176,8 @@ def chunk_delta_rule_osgm(
     o, final_h, final_d = ChunkDeltaRuleFunction.apply(
         q, k, v, beta, scale, eta, initial_h, initial_d, output_final_state,
         use_qk_l2norm_in_kernel, cu_seqlens,
-        use_denominator, d_min, d_max
+        use_denominator, d_min, d_max,
+        use_wy_fast
     )
     
     if output_final_state:
