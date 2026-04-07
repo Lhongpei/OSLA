@@ -6,9 +6,9 @@ import torch
 import torch.nn.functional as F
 
 from fla.ops.delta_rule import chunk_delta_rule
-from fla.ops.osla_delta_rule.chunk_osgm import chunk_delta_rule_osgm
-from fla.ops.osla_delta_rule.chunk import chunk_osla_delta_rule
-from fla.ops.osla_delta_rule.chunk_osgm_phase import compute_osgm_phase1_fwd
+from fla.ops.os_delta_rule.chunk_osgm import chunk_delta_rule_osgm
+from fla.ops.os_delta_rule.chunk import chunk_os_delta_rule
+from fla.ops.os_delta_rule.chunk_osgm_phase import compute_osgm_phase1_fwd
 from fla.modules.l2norm import l2norm_fwd
 
 
@@ -106,7 +106,7 @@ def run():
         t_bl = timed_fwd(chunk_delta_rule, q, k, v, beta, scale,
                          use_qk_l2norm_in_kernel=True, cu_seqlens=cu)
 
-        t_osla = timed_fwd(chunk_osla_delta_rule, q, k, v, beta, scale,
+        t_osla = timed_fwd(chunk_os_delta_rule, q, k, v, beta, scale,
                            initial_scale=init_scale, use_qk_l2norm_in_kernel=True,
                            cu_seqlens=cu)
 
@@ -140,7 +140,7 @@ def run():
         t_bl = timed_fwd_bwd(chunk_delta_rule, q1, k1, v1, b1, scale,
                              use_qk_l2norm_in_kernel=True, cu_seqlens=cu)
 
-        t_osla = timed_fwd_bwd(chunk_osla_delta_rule, q2, k2, v2, b2, scale,
+        t_osla = timed_fwd_bwd(chunk_os_delta_rule, q2, k2, v2, b2, scale,
                                initial_scale=init_scale, use_qk_l2norm_in_kernel=True,
                                cu_seqlens=cu)
 

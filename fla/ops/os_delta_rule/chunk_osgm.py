@@ -10,16 +10,16 @@ import torch
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
-from fla.ops.osla_delta_rule.wy_fast_osla import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
+from fla.ops.os_delta_rule.wy_fast_osla import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
-from fla.ops.osla_delta_rule.chunk_osgm_phase import (
+from fla.ops.os_delta_rule.chunk_osgm_phase import (
     compute_osgm_phase1_fwd as compute_osgm_phase1_fwd_rec, 
     compute_osgm_phase1_bwd as compute_osgm_phase1_bwd_rec,
     fused_osgm_bwd_mapping
 )
 
-from fla.ops.osla_delta_rule.chunk_osgm_phase_wy import (
+from fla.ops.os_delta_rule.chunk_osgm_phase_wy import (
     compute_osgm_phase1_fwd_wy,
     compute_osgm_phase1_bwd_wy
 )

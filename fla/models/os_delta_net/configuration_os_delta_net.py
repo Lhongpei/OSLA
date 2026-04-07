@@ -5,7 +5,7 @@ from typing import Dict, Optional
 from transformers.configuration_utils import PretrainedConfig
 
 
-class OSLAConfig(PretrainedConfig):
+class OSDNConfig(PretrainedConfig):
 
     model_type = 'osla_delta_net'
     keys_to_ignore_at_inference = ['past_key_values']

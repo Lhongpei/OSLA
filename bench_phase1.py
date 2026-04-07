@@ -2,11 +2,11 @@
 Correctness + performance test for optimized phase1 kernel.
 """
 import torch
-from fla.ops.osla_delta_rule.chunk_osgm_phase import (
+from fla.ops.os_delta_rule.chunk_osgm_phase import (
     compute_osgm_phase1_fwd,
     compute_osgm_phase1_bwd,
 )
-from fla.ops.osla_delta_rule.chunk_osgm_phase_v2 import (
+from fla.ops.os_delta_rule.chunk_osgm_phase_v2 import (
     compute_osgm_phase1_fwd_v2,
     compute_osgm_phase1_bwd_v2,
 )

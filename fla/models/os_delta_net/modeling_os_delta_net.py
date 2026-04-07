@@ -17,7 +17,7 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.delta_net import DeltaNet
-from fla.models.osla.configuration_osla_delta_net import OSLAConfig
+from fla.models.os_delta_net.configuration_os_delta_net import OSDNConfig
 from fla.models.utils import Cache
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules import GatedMLP as DeltaNetMLP
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 
 class OSLABlock(nn.Module):
-    def __init__(self, config: OSLAConfig, layer_idx: int):
+    def __init__(self, config: OSDNConfig, layer_idx: int):
         super().__init__()
 
         self.config = config
@@ -118,7 +118,7 @@ class OSLABlock(nn.Module):
 
 class OSLAPreTrainedModel(PreTrainedModel):
 
-    config_class = OSLAConfig
+    config_class = OSDNConfig
     base_model_prefix = 'model'
     supports_gradient_checkpointing = True
     _no_split_modules = ['DeltaNetBlock']
@@ -171,9 +171,9 @@ class OSLAPreTrainedModel(PreTrainedModel):
                     raise ValueError(f"Invalid prenorm_residual_strategy: {prenorm_residual_strategy}")
 
 
-class OSLAModel(OSLAPreTrainedModel):
+class OSDNModel(OSLAPreTrainedModel):
 
-    def __init__(self, config: OSLAConfig):
+    def __init__(self, config: OSDNConfig):
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -274,13 +274,13 @@ class OSLAModel(OSLAPreTrainedModel):
         )
 
 
-class OSLAForCausalLM(OSLAPreTrainedModel, GenerationMixin):
+class OSDNForCausalLM(OSLAPreTrainedModel, GenerationMixin):
 
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.model = OSLAModel(config)
+        self.model = OSDNModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.criterion = None

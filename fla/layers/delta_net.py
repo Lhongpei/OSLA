@@ -18,10 +18,10 @@ from torch.nn import functional as F
 from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, pad_input, update_layer_cache
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.delta_rule import chunk_delta_rule, fused_recurrent_delta_rule
-from fla.ops.osla_delta_rule.fused_recurrent import fused_recurrent_delta_rule as fused_recurrent_delta_rule_osla
-from fla.ops.osla_delta_rule.chunk import chunk_osla_delta_rule
-from fla.ops.osla_delta_rule.fused_recurrent_osgm import fused_recurrent_delta_rule_osgm
-from fla.ops.osla_delta_rule.chunk_osgm import chunk_delta_rule_osgm
+from fla.ops.os_delta_rule.fused_recurrent import fused_recurrent_delta_rule as fused_recurrent_delta_rule_osla
+from fla.ops.os_delta_rule.chunk import chunk_os_delta_rule
+from fla.ops.os_delta_rule.fused_recurrent_osgm import fused_recurrent_delta_rule_osgm
+from fla.ops.os_delta_rule.chunk_osgm import chunk_delta_rule_osgm
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -330,7 +330,7 @@ class DeltaNet(nn.Module):
                     d_max=self.osgm_d_max,
                 )
             elif use_osla:
-                o, recurrent_state = chunk_osla_delta_rule(
+                o, recurrent_state = chunk_os_delta_rule(
                     q=q,
                     k=k,
                     v=v,

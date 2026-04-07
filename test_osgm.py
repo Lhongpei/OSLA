@@ -69,8 +69,8 @@ def reference_osgm_delta_rule(
 # ===================================================================
 # 2. Triton Kernels 接入
 # ===================================================================
-from fla.ops.osla_delta_rule.fused_recurrent_osgm import fused_recurrent_delta_rule_osgm
-from fla.ops.osla_delta_rule.chunk_osgm import chunk_delta_rule_osgm
+from fla.ops.os_delta_rule.fused_recurrent_osgm import fused_recurrent_delta_rule_osgm
+from fla.ops.os_delta_rule.chunk_osgm import chunk_delta_rule_osgm
 
 def run_recurrent_kernel(q, k, v, beta, scale, eta, h0, d0, use_denom, d_min, d_max, use_l2norm):
     # 注意：recurrent 算子内部也需要支持 initial_state=(h0, d0)

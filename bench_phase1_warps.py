@@ -3,7 +3,7 @@ import torch
 import triton
 import triton.language as tl
 from fla.modules.l2norm import l2norm_fwd
-from fla.ops.osla_delta_rule.chunk_osgm_phase import (
+from fla.ops.os_delta_rule.chunk_osgm_phase import (
     osgm_phase1_fwd_kernel,
     osgm_phase1_bwd_kernel,
 )
@@ -78,7 +78,7 @@ def main():
     # Also test with T as non-constexpr by using do_not_specialize
     print()
     print("Default (no num_warps specified):")
-    from fla.ops.osla_delta_rule.chunk_osgm_phase import compute_osgm_phase1_fwd, compute_osgm_phase1_bwd
+    from fla.ops.os_delta_rule.chunk_osgm_phase import compute_osgm_phase1_fwd, compute_osgm_phase1_bwd
     t_fwd = timed(compute_osgm_phase1_fwd, k_norm, eta, use_denom, d_min, d_max)
     d_out = compute_osgm_phase1_fwd(k_norm, eta, use_denom, d_min, d_max)
     t_bwd = timed(compute_osgm_phase1_bwd, k_norm, d_out, dd_in, eta, use_denom, d_min, d_max)

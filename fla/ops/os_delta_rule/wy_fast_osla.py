@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-from fla.ops.osla_delta_rule.chunk_scaled_dot_qkw import chunk_scaled_dot_qkw_fwd
+from fla.ops.os_delta_rule.chunk_scaled_dot_qkw import chunk_scaled_dot_qkw_fwd
 from fla.ops.utils import prepare_chunk_indices
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import check_shared_mem, is_nvidia_hopper

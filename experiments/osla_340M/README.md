@@ -117,7 +117,7 @@ On WikiText (shorter articles), DeltaNet wins by 1.5 ppl. With shorter sequences
 
 ### Training efficiency trade-off
 
-OSLA's fused_recurrent mode is 3.6x slower than DeltaNet's chunk mode. This is a fundamental limitation: the preconditioner `D_t` depends on all previous `k_t`, making the recurrence inherently sequential. A chunk-based OSLA implementation (in progress under `fla/ops/osla_delta_rule/chunk.py`) would be needed to close this gap.
+OSLA's fused_recurrent mode is 3.6x slower than DeltaNet's chunk mode. This is a fundamental limitation: the preconditioner `D_t` depends on all previous `k_t`, making the recurrence inherently sequential. A chunk-based OSLA implementation (in progress under `fla/ops/os_delta_rule/chunk.py`) would be needed to close this gap.
 
 ## Bug Fixes Applied During This Experiment
 
@@ -127,7 +127,7 @@ The original OSLA kernel (`fla/ops/delta_rule/fused_recurrent_osla.py`) had inco
 - `dq` was computed using un-normalized state `S_t` (missing the `/(D_t+1)` denominator)
 - `dk` ignored the gradient through the preconditioner `D_t`
 
-We switched to the corrected kernel at `fla/ops/osla_delta_rule/fused_recurrent.py` (commits `48db7c5`..`5f9a015`).
+We switched to the corrected kernel at `fla/ops/os_delta_rule/fused_recurrent.py` (commits `48db7c5`..`5f9a015`).
 
 ### 2. Numerical instability (eps too small)
 

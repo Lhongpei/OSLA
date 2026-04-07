@@ -3,8 +3,8 @@ import torch.nn.functional as F
 import time
 
 # 导入你的两个 Triton 算子
-from fla.ops.osla_delta_rule.fused_recurrent_osgm import fused_recurrent_delta_rule_osgm
-from fla.ops.osla_delta_rule.chunk_osgm import chunk_delta_rule_osgm
+from fla.ops.os_delta_rule.fused_recurrent_osgm import fused_recurrent_delta_rule_osgm
+from fla.ops.os_delta_rule.chunk_osgm import chunk_delta_rule_osgm
 
 def benchmark_fn(fn, *args, num_warmup=10, num_iters=50, backward=False, **kwargs):
     """标准的 PyTorch CUDA 精确测速函数"""

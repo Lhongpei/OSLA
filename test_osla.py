@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from fla.ops.osla_delta_rule.fused_recurrent import fused_recurrent_delta_rule
+from fla.ops.os_delta_rule.fused_recurrent import fused_recurrent_delta_rule
 
 def reference_recurrent_delta_rule(q, k, v, beta, scale, h0=None, d0=None):
     B, T, H, K = q.shape

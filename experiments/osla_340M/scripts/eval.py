@@ -6,7 +6,7 @@ import json
 import sys
 import torch
 import fla  # noqa — registers FLA model types
-import fla.models.osla  # noqa — registers OSLA model type
+import fla.models.os_delta_net  # noqa — registers OSLA model type
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import lm_eval

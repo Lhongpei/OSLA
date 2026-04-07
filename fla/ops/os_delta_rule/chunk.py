@@ -19,8 +19,8 @@ from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from fla.ops.common.chunk_o import chunk_fwd_o
 from fla.ops.delta_rule.wy_fast import recompute_w_u_fwd
-from fla.ops.osla_delta_rule.chunk_pkt import chunk_scaled_dot_pkt_fwd
-from fla.ops.osla_delta_rule.fused_recurrent import fused_recurrent_delta_rule_bwd
+from fla.ops.os_delta_rule.chunk_pkt import chunk_scaled_dot_pkt_fwd
+from fla.ops.os_delta_rule.fused_recurrent import fused_recurrent_delta_rule_bwd
 from fla.ops.utils.solve_tril import solve_tril
 from fla.utils import input_guard
 
@@ -121,7 +121,7 @@ class ChunkOSLAFunction(torch.autograd.Function):
 
 
 @torch.compiler.disable
-def chunk_osla_delta_rule(q, k, v, beta=None, scale=None, initial_state=None,
+def chunk_os_delta_rule(q, k, v, beta=None, scale=None, initial_state=None,
                           initial_scale=None, output_final_state=False,
                           use_qk_l2norm_in_kernel=False, cu_seqlens=None):
     if cu_seqlens is not None and q.shape[0] != 1:
