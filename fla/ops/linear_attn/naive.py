@@ -1,7 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 from einops import rearrange
@@ -13,11 +15,11 @@ def naive_recurrent_linear_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    scale: Optional[float] = None,
-    normalize: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale: float | None = None,
+    normalize: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     dtype = q.dtype
     if scale is None:
         scale = q.shape[-1] ** -0.5
@@ -40,9 +42,9 @@ def naive_chunk_linear_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: Optional[float] = None,
-    normalize: bool = False
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    scale: float | None = None,
+    normalize: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = q.shape[-1] ** -0.5
     chunk_size = 64
@@ -56,7 +58,7 @@ def naive_chunk_linear_attn(
     intra = ((
         q @ k.transpose(-1, -2)).masked_fill_(
         torch.triu(torch.ones(chunk_size, chunk_size, dtype=bool, device=q.device), diagonal=1),
-        0
+        0,
     )) @ v
     o = inter + intra
     if normalize:

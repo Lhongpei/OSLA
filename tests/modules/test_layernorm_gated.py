@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -19,7 +24,7 @@ from fla.utils import assert_close, device
             (2, 2, 2048, 1200, True,  "sigmoid", False),
             (2, 2, 50,   50,  False, "sigmoid", False),
         ]
-    ]
+    ],
 )
 def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: bool, activation: str, bias: bool):
     torch.manual_seed(42)
@@ -67,7 +72,7 @@ def test_layernorm_gated(B: int, H: int, T: int, D: int, elementwise_affine: boo
             (2, 2, 2048, 1200, "silu"),
             (2, 2, 50,   50,  "sigmoid"),
         ]
-    ]
+    ],
 )
 def test_rmsnorm_gated(B: int, H: int, T: int, D: int, activation: str):
     torch.manual_seed(42)

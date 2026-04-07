@@ -1,5 +1,11 @@
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
+
 import os
-from typing import List
 
 import numpy as np
 import pytest
@@ -31,7 +37,7 @@ def test_chunk(
     L = int(np.log2(T) + 1)
     x = torch.randn(B, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
-        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4
+        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
@@ -43,7 +49,57 @@ def test_chunk(
     out, _ = chunk_log_linear_attn(q, k, v, g, level_scales)
 
     ref = naive_log_linear_attn(q, k, v, g, level_scales)
+
     assert_close("o", ref, out, 0.004)
+
+
+@pytest.mark.parametrize(
+    ("B", "T", "H", "D", "dtype"),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-{}".format(*test))
+        for test in [(2, 512, 8, 64, torch.float32), (2, 1024, 8, 128, torch.float32)]
+    ],
+)
+@pytest.mark.skipif(device_platform == "intel", reason="Intel Triton Failure")
+def test_chunk_bwd(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    os.environ["TRITON_F32_DEFAULT"] = "ieee"
+
+    L = int(np.log2(T) + 1)
+    x = torch.randn(B, T, H, D, dtype=dtype, device=device)
+    dt = torch.nn.functional.softplus(
+        torch.randn(B, T, H, dtype=torch.float32, device=device) - 4,
+    )
+    a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
+    q = torch.randn(B, T, 1, D, dtype=dtype, device=device)
+    k = torch.randn(B, T, 1, D, dtype=dtype, device=device)
+    level_scales = torch.randn(B, T, H, L, dtype=dtype, device=device)
+    v = (x * dt.unsqueeze(-1)).to(dtype=dtype)
+    g = a * dt
+    do = torch.randn_like(v)
+    q, k, v, g, level_scales = map(lambda x: x.to(device).requires_grad_(), (q, k, v, g, level_scales))
+
+    out, _ = chunk_log_linear_attn(q, k, v, g, level_scales)
+    (out * do).sum().backward()
+    tri_dq, tri_dk, tri_dv, tri_dg, tri_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
+    q.grad = k.grad = v.grad = g.grad = level_scales.grad = None
+
+    ref = naive_log_linear_attn(q, k, v, g, level_scales)
+    (ref * do).sum().backward()
+    ref_dq, ref_dk, ref_dv, ref_dg, ref_dl = q.grad, k.grad, v.grad, g.grad, level_scales.grad
+
+    assert_close("o", ref, out, 0.004)
+    assert_close("dq", ref_dq, tri_dq, 0.007)
+    assert_close("dk", ref_dk, tri_dk, 0.008)
+    assert_close("dv", ref_dv, tri_dv, 0.007)
+    assert_close("dg", ref_dg, tri_dg, 0.015)
+    assert_close("dl", ref_dl, tri_dl, 0.015)
 
 
 @pytest.mark.parametrize(
@@ -61,7 +117,7 @@ def test_chunk(
 def test_chunk_varlen(
     H: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -73,7 +129,7 @@ def test_chunk_varlen(
     L = int(np.ceil(np.log2(T)) + 1)
     x = torch.randn(1, T, H, D, dtype=dtype, device=device)
     dt = torch.nn.functional.softplus(
-        torch.randn(1, T, H, dtype=torch.float32, device=device) - 4
+        torch.randn(1, T, H, dtype=torch.float32, device=device) - 4,
     )
     a = -torch.exp(torch.rand(H, dtype=torch.float32, device=device))
     q = torch.randn(1, T, 1, D, dtype=dtype, device=device)

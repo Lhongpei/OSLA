@@ -1,35 +1,16 @@
-# -*- coding: utf-8 -*-
-
-from typing import List, Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
-import torch.nn.functional as F
-from einops import rearrange, repeat
 
+from fla.ops.forgetting_attn import naive_forgetting_attn
 from fla.ops.forgetting_attn.parallel import parallel_forgetting_attn
-from fla.utils import assert_close, check_shared_mem, device, is_intel_alchemist
-
-
-def naive_forgetting_attn(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    g: torch.Tensor,
-    scale: Optional[float] = None
-):
-    _, T, HQ, D = q.shape
-    H = k.shape[2]
-    G = HQ // H
-    if scale is None:
-        scale = D ** -0.5
-    gc = g.float().cumsum(1)
-    mask = torch.tril(torch.ones((T, T), dtype=torch.bool, device=device))
-    ref = torch.einsum("bqhd,bkhd->bhqk", q.float() * scale, repeat(k, "b t h d -> b t (h g) d", g=G).float())
-    ref = ref + rearrange(gc, "b t h -> b h t 1") - rearrange(gc, "b t h -> b h 1 t")
-    ref = ref.masked_fill(~mask.unsqueeze(0).unsqueeze(0), -float('inf'))
-    ref = torch.einsum("bhqk,bkhd->bqhd", F.softmax(ref, dim=-1), repeat(v, "b t h d -> b t (h g) d", g=G).float())
-    return ref
+from fla.utils import IS_INTEL_ALCHEMIST, assert_close, check_shared_mem, device
 
 
 @pytest.mark.parametrize(
@@ -41,9 +22,9 @@ def naive_forgetting_attn(
             (3, 111, 2, 2, 100, 1.0),
             (3, 1024, 2, 8, 60, 0.1),
             (3, 1024, 2, 8, 128, 0.1),
-            (4, 2048, 2, 8, 64, 0.1)
+            (4, 2048, 2, 8, 64, 0.1),
         ]
-    ]
+    ],
 )
 def test_parallel(
     B: int,
@@ -96,17 +77,17 @@ def test_parallel(
             (2, 8, 64, [0, 256, 500, 1000]),
             (2, 2, 100, [0, 15, 100, 300, 1200, 2000]),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
-    is_intel_alchemist,
-    reason="Intel Triton Failure"
+    IS_INTEL_ALCHEMIST,
+    reason="Intel Triton Failure",
 )
 def test_parallel_varlen(
     H: int,
     HQ: int,
     D: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
 ):
     torch.manual_seed(42)
     T = cu_seqlens[-1]
@@ -120,12 +101,12 @@ def test_parallel_varlen(
     do = torch.randn((1, T, HQ, D), dtype=dtype, device=device)
 
     ref = q.new_empty(1, T, HQ, D)
-    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+    for bos, eos in zip(cu_seqlens[:-1], cu_seqlens[1:], strict=False):
         ref[:, bos:eos] = naive_forgetting_attn(
             q=q[:, bos:eos],
             k=k[:, bos:eos],
             v=v[:, bos:eos],
-            g=g[:, bos:eos]
+            g=g[:, bos:eos],
         )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -138,7 +119,7 @@ def test_parallel_varlen(
         k=k,
         v=v,
         g=g,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None

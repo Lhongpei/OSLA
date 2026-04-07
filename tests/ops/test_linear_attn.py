@@ -1,6 +1,9 @@
-# -*- coding: utf-8 -*-
-
-from typing import Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import pytest
 import torch
@@ -23,15 +26,15 @@ from fla.utils import assert_close, device
             (2, 2048, 8, 256, None, torch.float16),
             (2, 2048, 4, 256, None, torch.float16),
         ]
-    ]
+    ],
 )
 def test_fused_recurrent(
     B: int,
     T: int,
     H: int,
     D: int,
-    scale: Optional[float],
-    dtype: torch.dtype
+    scale: float | None,
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -74,14 +77,14 @@ def test_fused_recurrent(
             (3, 1000, 4, 64, torch.float16),
             (2, 2048, 4, 256, torch.float16),
         ]
-    ]
+    ],
 )
 def test_chunk(
     B: int,
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -97,7 +100,7 @@ def test_chunk(
         v.to(torch.float32),
         initial_state=h0,
         output_final_state=True,
-        normalize=False
+        normalize=False,
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
@@ -111,7 +114,7 @@ def test_chunk(
         v=v,
         initial_state=h0,
         output_final_state=True,
-        normalize=False
+        normalize=False,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None
@@ -138,14 +141,14 @@ def test_chunk(
             (3, 1000, 4, 64, torch.float16),
             (2, 2048, 4, 256, torch.float16),
         ]
-    ]
+    ],
 )
 def test_fused_chunk(
     B: int,
     T: int,
     H: int,
     D: int,
-    dtype: torch.dtype
+    dtype: torch.dtype,
 ):
     torch.manual_seed(42)
     q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
@@ -161,7 +164,7 @@ def test_fused_chunk(
         v.to(torch.float32),
         initial_state=h0,
         output_final_state=True,
-        normalize=False
+        normalize=False,
     )
     ((ref * do).sum() + (ref_ht * dht).sum()).backward()
     ref_dq, q.grad = q.grad.clone(), None
@@ -175,7 +178,7 @@ def test_fused_chunk(
         v=v,
         initial_state=h0,
         output_final_state=True,
-        normalize=False
+        normalize=False,
     )
     ((tri * do).sum() + (tri_ht * dht).sum()).backward()
     tri_dq, q.grad = q.grad.clone(), None

@@ -1,11 +1,16 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import argparse
 import json
 import math
 import os
 from functools import partial
-from typing import Any, Dict, Iterator, List
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -23,7 +28,7 @@ class PerplexityEvaluator:
         device: str = "cuda",
         block_size: int = 32768,
         bucket_size: int = 2048,
-        batch_size: int = 1
+        batch_size: int = 1,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -34,14 +39,14 @@ class PerplexityEvaluator:
 
     @staticmethod
     def preprocess(
-        examples: Dict[str, List[Any]],
+        examples: dict[str, list[Any]],
         tokenizer: PreTrainedTokenizer,
         column_name: str = 'text'
     ) -> Dict[str, List[List[int]]]:
         tokenized = tokenizer(examples[column_name])
         return {
             'input_ids': tokenized['input_ids'],
-            'length': [len(ids) for ids in tokenized['input_ids']]
+            'length': [len(ids) for ids in tokenized['input_ids']],
         }
 
     def batchify(self, dataset: Dataset, tokens_per_batch: int) -> Iterator[List[torch.Tensor]]:
@@ -174,7 +179,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.path)
     model = AutoModelForCausalLM.from_pretrained(
         args.path,
-        device_map={"": device}
+        device_map={"": device},
     ).bfloat16().eval()
 
     if rank == 0:
@@ -183,7 +188,7 @@ def main():
     dataset = dataset.map(
         partial(PerplexityEvaluator.preprocess, tokenizer=tokenizer, column_name=args.column_name),
         batched=True,
-        num_proc=32
+        num_proc=32,
     )
 
     if rank == 0:
@@ -196,7 +201,7 @@ def main():
         device=device,
         block_size=args.block_size,
         bucket_size=args.bucket_size,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
     )
 
     with torch.no_grad():

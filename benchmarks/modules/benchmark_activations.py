@@ -1,4 +1,9 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -55,7 +60,7 @@ def fwdbwd(fn, *args):
         ylabel="Time (ms)",
         plot_name="activation_performance",
         args={},
-    )
+    ),
 )
 def benchmark(B, T, D, provider):
     requires_grad = True
@@ -86,15 +91,15 @@ def benchmark(B, T, D, provider):
         raise ValueError(provider)
 
     if provider.endswith('fwd'):
-        fn_to_call = lambda: fwd(fn, *inputs)  # noqa: E731
+        def fn_to_call(): return fwd(fn, *inputs)  # noqa: E731
     elif provider.endswith('fwdbwd'):
-        fn_to_call = lambda: fwdbwd(fn, *inputs)  # noqa: E731
+        def fn_to_call(): return fwdbwd(fn, *inputs)  # noqa: E731
     else:
         raise ValueError(provider)
 
     ms, min_ms, max_ms = triton.testing.do_bench(
         fn_to_call,
-        quantiles=[0.5, 0.2, 0.8]
+        quantiles=[0.5, 0.2, 0.8],
     )
     return ms, min_ms, max_ms
 

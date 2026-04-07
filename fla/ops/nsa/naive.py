@@ -1,8 +1,11 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
-from typing import Optional
 
 import torch
 from einops import repeat
@@ -14,9 +17,9 @@ def naive_nsa(
     v: torch.Tensor,
     block_indices: torch.LongTensor,
     block_size: int = 64,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    head_first: bool = False,
 ) -> torch.Tensor:
     r"""
     Args:
@@ -51,14 +54,14 @@ def naive_nsa(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
 
     dtype = q.dtype
@@ -73,7 +76,7 @@ def naive_nsa(
         varlen = False
         B, T = q.shape[:2]
         cu_seqlens = torch.cat([
-            block_indices.new_tensor(range(0, B*T, T)), block_indices.new_tensor([B*T])
+            block_indices.new_tensor(range(0, B*T, T)), block_indices.new_tensor([B*T]),
         ])
 
     for i in range(len(cu_seqlens) - 1):

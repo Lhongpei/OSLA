@@ -1,8 +1,11 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import warnings
-from typing import Optional, Tuple
 
 import torch
 import triton
@@ -10,7 +13,14 @@ import triton.language as tl
 
 from fla.ops.generalized_delta_rule.iplr.wy_fast import prepare_wy_repr_fwd
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, input_guard, use_cuda_graph
+from fla.utils import (
+    USE_CUDA_GRAPH,
+    autocast_custom_bwd,
+    autocast_custom_fwd,
+    autotune_cache_kwargs,
+    check_shared_mem,
+    input_guard,
+)
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 
@@ -26,7 +36,8 @@ BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
         for num_warps in [2, 4] + ([] if check_shared_mem('hopper') else [8])
     ],
     key=['BT', 'BK', 'BV'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
@@ -110,7 +121,8 @@ def chunk_generalized_iplr_delta_rule_fwd_kernel_h(
         for num_warps in [2, 4, 8]
     ],
     key=['BT'],
-    use_cuda_graph=use_cuda_graph,
+    use_cuda_graph=USE_CUDA_GRAPH,
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def chunk_generalized_iplr_delta_rule_fwd_kernel_o(
@@ -202,16 +214,18 @@ def chunk_generalized_iplr_delta_rule_fwd_o(
     v_new: torch.Tensor,
     b: torch.Tensor,
     h: torch.Tensor,
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K, V = *q.shape, v.shape[-1]
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
+    BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     o = torch.empty_like(v)
@@ -219,7 +233,7 @@ def chunk_generalized_iplr_delta_rule_fwd_o(
     def grid(meta): return (
         triton.cdiv(V, meta['BV']),
         NT,
-        B * H
+        B * H,
     )
     chunk_generalized_iplr_delta_rule_fwd_kernel_o[grid](
         q=q,
@@ -247,22 +261,24 @@ def chunk_generalized_iplr_delta_rule_fwd_h(
     w: torch.Tensor,
     u: torch.Tensor,
     b: torch.Tensor,
-    initial_state: Optional[torch.Tensor] = None,
+    initial_state: torch.Tensor | None = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, u.shape[-1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
+    BT = chunk_size
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
     else:
         N, NT, chunk_offsets = len(cu_seqlens) - 1, len(chunk_indices), prepare_chunk_offsets(cu_seqlens, BT)
 
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
     assert BK <= 256, "current kernel does not support head dimension larger than 256."
     # H100 can have larger block size
 
@@ -321,18 +337,18 @@ def chunk_generalized_iplr_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    chunk_size: int = 64
+    cu_seqlens: torch.LongTensor | None = None,
+    chunk_size: int = 64,
+    chunk_indices: torch.LongTensor | None = None,
 ):
-    T = q.shape[1]
-    BT = min(chunk_size, max(triton.next_power_of_2(T), 16))
     w, u, _ = prepare_wy_repr_fwd(
         a=a,
         b=b,
         k=k,
         v=v,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
 
     h, v_new, final_state = chunk_generalized_iplr_delta_rule_fwd_h(
@@ -344,7 +360,8 @@ def chunk_generalized_iplr_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     o = chunk_generalized_iplr_delta_rule_fwd_o(
         q=q,
@@ -355,7 +372,8 @@ def chunk_generalized_iplr_delta_rule_fwd(
         h=h,
         scale=scale,
         cu_seqlens=cu_seqlens,
-        chunk_size=BT
+        chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
     )
     return o, final_state
 
@@ -375,10 +393,12 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         output_final_state: bool,
-        cu_seqlens: Optional[torch.LongTensor] = None,
+        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens_cpu: torch.LongTensor | None = None,
     ):
-        chunk_size = 64
-
+        chunk_size = min(64, max(triton.next_power_of_2(q.shape[1]), 16))
+        chunk_indices = prepare_chunk_indices(
+            cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
         o, final_state = chunk_generalized_iplr_delta_rule_fwd(
             q=q,
             k=k,
@@ -389,7 +409,8 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
+            chunk_indices=chunk_indices,
         )
         return o.to(q.dtype), final_state
 
@@ -399,11 +420,11 @@ class ChunkGeneralizedIPLRDeltaRuleFunction(torch.autograd.Function):
     def backward(
         ctx,
         do: torch.Tensor,
-        dht: torch.Tensor
+        dht: torch.Tensor,
     ):
         raise NotImplementedError(
             "Backward pass for ChunkGeneralizedIPLRDeltaRuleFunction is not implemented yet. "
-            "Stay tuned!"
+            "Stay tuned!",
         )
 
 
@@ -417,8 +438,9 @@ def chunk_iplr_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    head_first: bool = False
+    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens_cpu: torch.LongTensor | None = None,
+    head_first: bool = False,
 ):
     r"""
     Args:
@@ -444,6 +466,8 @@ def chunk_iplr_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        cu_seqlens_cpu (torch.LongTensor):
+            CPU version of cumulative sequence lengths of shape `[N+1]`.
         head_first (Optional[bool]):
             Whether the inputs are in the head-first format. Default: `False`.
             This argument has been deprecated.
@@ -457,25 +481,25 @@ def chunk_iplr_delta_rule(
     if head_first:
         raise DeprecationWarning(
             "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead."
+            "Please use head_first=False for now instead.",
         )
     if not head_first and q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
             "when head_first=False was specified. "
-            "Please verify your input tensor format matches the expected shape [B, T, H, ...]."
+            "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
         )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
-                f"Please flatten variable-length inputs before processing."
+                f"Please flatten variable-length inputs before processing.",
             )
         if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
-                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
+                f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.",
             )
     scale = k.shape[-1] ** -0.5 if scale is None else scale
     o, final_state = ChunkGeneralizedIPLRDeltaRuleFunction.apply(
@@ -488,5 +512,6 @@ def chunk_iplr_delta_rule(
         initial_state,
         output_final_state,
         cu_seqlens,
+        cu_seqlens_cpu,
     )
     return o, final_state

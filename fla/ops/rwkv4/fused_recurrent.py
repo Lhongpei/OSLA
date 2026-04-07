@@ -1,5 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2024, Songlin Yang, Yu Zhang
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 from typing import Any, cast
 
@@ -463,7 +467,7 @@ class FusedRecurrentRWKV4Function(Function):
     @once_differentiable
     @input_guard
     def backward(ctx: FunctionCtx, gwkv: Tensor, gstate: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        w, u, k, v, state = cast(tuple[Tensor, ...], ctx.saved_tensors)
+        w, u, k, v, state = cast("tuple[Tensor, ...]", ctx.saved_tensors)
         gw, gu, gk, gv, gstate = fused_recurrent_rwkv4_backward(w, u, k, v, state, gwkv, gstate)
         return gw.to(ctx.w_dtype), gu.to(u), gk.to(k), gv.to(v), gstate.to(state)
 

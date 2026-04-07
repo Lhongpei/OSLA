@@ -1,7 +1,12 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import math
-from typing import Dict, Optional
+import warnings
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -33,20 +38,21 @@ class SambaConfig(PretrainedConfig):
         time_step_init_scheme: str = "random",
         time_step_floor: float = 1e-4,
         max_position_embeddings: int = 2048,
-        attn: Optional[Dict] = {
+        attn: dict | None = {
             'layers': (1, 3, 5, 7, 9, 11, 13, 15, 17),
             'num_heads': 18,
             'num_kv_heads': 18,
             'qkv_bias': False,
             'window_size': 2048,
-            'rope_theta': 10000.
+            'rope_theta': 10000.,
         },
-        hidden_ratio: Optional[int] = 4,
+        hidden_ratio: int | None = 4,
         rescale_prenorm_residual: bool = False,
         use_cache: bool = True,
         fuse_norm: bool = True,
         fuse_swiglu: bool = True,
         fuse_cross_entropy: bool = True,
+        fuse_linear_cross_entropy: bool = False,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
         tie_word_embeddings: bool = False,
@@ -82,13 +88,25 @@ class SambaConfig(PretrainedConfig):
         self.fuse_norm = fuse_norm
         self.fuse_swiglu = fuse_swiglu
         self.fuse_cross_entropy = fuse_cross_entropy
+        self.fuse_linear_cross_entropy = fuse_linear_cross_entropy
         self.use_l2warp = use_l2warp
         self.vocab_size = vocab_size
+
+        if fuse_cross_entropy and fuse_linear_cross_entropy:
+            raise ValueError(
+                "`fuse_cross_entropy` and `fuse_linear_cross_entropy` cannot be True at the same time.",
+            )
+        if fuse_linear_cross_entropy:
+            warnings.warn(
+                "`fuse_linear_cross_entropy` is enabled, which can improves memory efficiency "
+                "at the potential cost of reduced precision. "
+                "If you observe issues like loss divergence, consider disabling this setting.",
+            )
 
         super().__init__(
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             pad_token_id=pad_token_id,
             tie_word_embeddings=tie_word_embeddings,
-            **kwargs
+            **kwargs,
         )

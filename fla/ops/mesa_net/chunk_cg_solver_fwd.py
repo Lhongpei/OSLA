@@ -1,8 +1,9 @@
-
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -20,7 +21,7 @@ def chunk_update_once(
     b_m,
     b_g_exp_q,
     b_h,
-    b_lamb
+    b_lamb,
 ):
     b_o = tl.dot((tl.dot(b_p.to(b_k.dtype), tl.trans(b_k)) * b_m).to(b_v.dtype), b_v)
     b_o += tl.dot((b_p * b_g_exp_q).to(b_h.dtype), b_h)
@@ -142,10 +143,11 @@ def chunk_mesa_cg_fwd(
     g_local_cumsum: torch.Tensor,
     beta: torch.Tensor,
     lamb: torch.Tensor,  # lambda
-    cu_seqlens: Optional[torch.Tensor] = None,
+    cu_seqlens: torch.Tensor | None = None,
     chunk_size: int = 64,
     max_CG_iteration: int = 30,
-    output_dtype: Optional[torch.dtype] = None
+    output_dtype: torch.dtype | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ) -> torch.Tensor:
     B, T, H, K = q.shape
     assert K <= 128, "head dimension must be less than 128"
@@ -156,9 +158,10 @@ def chunk_mesa_cg_fwd(
     assert h_kv is not None, "h_kv must be provided if calculate_output is True"
     o = torch.empty_like(v)
 
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     NT = triton.cdiv(T, chunk_size) if cu_seqlens is None else len(chunk_indices)
-    BK = triton.next_power_of_2(K)
+    BK = max(triton.next_power_of_2(K), 16)
     grid = (NT, H*B)
 
     chunk_fwd_mesa_cg_dim64_kernel[grid](
@@ -181,6 +184,6 @@ def chunk_mesa_cg_fwd(
         BT=chunk_size,
         BK=BK,
         num_warps=4,
-        num_stages=1
+        num_stages=1,
     )
     return q_final, o

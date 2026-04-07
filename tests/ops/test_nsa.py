@@ -1,7 +1,11 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import os
-from typing import List
 
 import pytest
 import torch
@@ -19,16 +23,13 @@ from fla.utils import assert_close, device
     [
         pytest.param(*test, id="B{}-T{}-H{}-HQ{}-D{}-S{}-block_size{}-scale{}-{}".format(*test))
         for test in [
-            (1, 63, 1, 1, 64, 16, 32, 1.0, torch.float16),
-            (3, 111, 2, 2, 100, 16, 32, 1.0, torch.float16),
-            (3, 1024, 2, 8, 60, 16, 32, 0.1, torch.float16),
-            (3, 1024, 2, 8, 128, 16, 32, 0.1, torch.float16),
-            (4, 2048, 2, 8, 64, 16, 32, 0.1, torch.float16)
+            (1, 63, 1, 16, 64, 16, 32, 1.0, torch.float16),
+            (3, 111, 1, 32, 100, 16, 32, 1.0, torch.float16),
+            (3, 1024, 2, 32, 60, 16, 32, 0.1, torch.float16),
+            (3, 1024, 2, 32, 128, 16, 32, 0.1, torch.float16),
+            (4, 2048, 2, 32, 64, 16, 32, 0.1, torch.float16),
         ]
-    ]
-)
-@pytest.mark.skipif(
-    True, reason='TBD'
+    ],
 )
 def test_parallel(
     B: int,
@@ -80,18 +81,15 @@ def test_parallel(
     [
         pytest.param(*test, id="H{}-HQ{}-D{}-S{}-block_size{}-cu_seqlens{}-{}".format(*test))
         for test in [
-            (2, 2, 64, 16, 32, [0, 15], torch.float16),
-            (2, 8, 64, 16, 32, [0, 256, 500, 1000], torch.float16),
-            (2, 2, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], torch.float16),
+            (1, 16, 64, 16, 32, [0, 15], torch.float16),
+            (2, 32, 64, 16, 32, [0, 256, 500, 1000], torch.float16),
+            (2, 32, 100, 16, 32, [0, 15, 100, 300, 1200, 2000], torch.float16),
         ]
-    ]
+    ],
 )
 @pytest.mark.skipif(
     os.getenv('SKIP_TEST_CHUNK_VARLEN') == '1',
-    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set'
-)
-@pytest.mark.skipif(
-    True, reason='TBD'
+    reason='Skipping test because SKIP_TEST_CHUNK_VARLEN is set',
 )
 def test_parallel_varlen(
     H: int,
@@ -99,7 +97,7 @@ def test_parallel_varlen(
     D: int,
     S: int,
     block_size: int,
-    cu_seqlens: List[int],
+    cu_seqlens: list[int],
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -130,7 +128,7 @@ def test_parallel_varlen(
         v=v,
         block_indices=block_indices,
         block_size=block_size,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     ref.backward(do)
     ref_dq, q.grad = q.grad.clone(), None
@@ -143,7 +141,7 @@ def test_parallel_varlen(
         v=v,
         block_indices=block_indices,
         block_size=block_size,
-        cu_seqlens=cu_seqlens
+        cu_seqlens=cu_seqlens,
     )
     tri.backward(do)
     tri_dq, q.grad = q.grad.clone(), None

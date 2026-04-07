@@ -1,7 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional, Tuple
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -73,9 +75,9 @@ def chunk_mesa_net_h_kk_bwd_intra_kernel(
 
     b_dk = tl.zeros([BT, BK], dtype=tl.float32)
     b_dv = tl.zeros([BT, BK], dtype=tl.float32)
-    b_dbeta = tl.zeros([BT, ], dtype=tl.float32)
-    b_dg_last = tl.zeros([1,], dtype=tl.float32)
-    b_dg = tl.zeros([BT,], dtype=tl.float32)
+    b_dbeta = tl.zeros([BT], dtype=tl.float32)
+    b_dg_last = tl.zeros([1], dtype=tl.float32)
+    b_dg = tl.zeros([BT], dtype=tl.float32)
 
     p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
     b_g = tl.load(p_g, boundary_check=(0,))
@@ -144,19 +146,21 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
     q_star: torch.Tensor,
     dq: torch.Tensor,
     dk_beta: torch.Tensor,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    chunk_indices: torch.LongTensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
     B, T, H, K = k.shape
     V = K
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    chunk_indices = prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
 
     # CONST_TILING = 64
-    BK = triton.next_power_of_2(K)
-    BV = triton.next_power_of_2(V)
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = max(triton.next_power_of_2(V), 16)
     dk = torch.empty_like(k)
     dg = torch.empty_like(g)
     dbeta = torch.empty_like(beta)
@@ -185,7 +189,7 @@ def chunk_mesa_net_h_kk_bwd_intra_fn(
         V=V,
         BT=BT,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     dlamb = dlamb.sum([0, 1])
     return dk, dg, dlamb, dbeta

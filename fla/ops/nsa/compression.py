@@ -1,7 +1,9 @@
-# -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-
-from typing import Optional
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
@@ -10,11 +12,11 @@ import triton.language as tl
 from fla.ops.attn.parallel import parallel_attn_bwd_preprocess
 from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets, prepare_token_indices
 from fla.ops.utils.op import exp, log
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem, contiguous
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, check_shared_mem, contiguous
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -22,6 +24,7 @@ from fla.utils import autocast_custom_bwd, autocast_custom_fwd, check_shared_mem
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def parallel_nsa_compression_fwd_kernel(
@@ -124,6 +127,7 @@ def parallel_nsa_compression_fwd_kernel(
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
 @triton.jit(do_not_specialize=['T'])
 def parallel_nsa_compression_bwd_kernel_dq(
@@ -149,7 +153,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_t, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
@@ -219,7 +223,7 @@ def parallel_nsa_compression_bwd_kernel_dq(
 
 
 @triton.heuristics({
-    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None
+    'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
 })
 @triton.autotune(
     configs=[
@@ -227,8 +231,9 @@ def parallel_nsa_compression_bwd_kernel_dq(
         for num_warps in [1, 2, 4]
     ],
     key=['BS', 'BK', 'BV'],
+    **autotune_cache_kwargs,
 )
-@triton.jit(do_not_specialize=['T'])
+@triton.jit(do_not_specialize=['T', 'TC'])
 def parallel_nsa_compression_bwd_kernel_dkv(
     q,
     k,
@@ -243,6 +248,7 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     chunk_offsets,
     scale,
     T,
+    TC,
     B: tl.constexpr,
     H: tl.constexpr,
     HQ: tl.constexpr,
@@ -253,28 +259,28 @@ def parallel_nsa_compression_bwd_kernel_dkv(
     BS: tl.constexpr,
     BK: tl.constexpr,
     BV: tl.constexpr,
-    IS_VARLEN: tl.constexpr
+    IS_VARLEN: tl.constexpr,
 ):
     i_v, i_c, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
 
-    all = B * T
+    all = B * TC
+
     if IS_VARLEN:
         i_n, i_c = tl.load(chunk_indices + i_c * 2).to(tl.int32), tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(cu_seqlens + i_n + 1).to(tl.int32)
         T = eos - bos
+        # the number of compression representations in total
+        TC = tl.cdiv(T, BS)
         boc = tl.load(chunk_offsets + i_n).to(tl.int32)
     else:
         bos, eos = i_b * T, i_b * T + T
         boc = i_b * tl.cdiv(T, BS)
 
-    # the number of compression representations in total
-    TC = tl.cdiv(T, BS)
-
     p_k = tl.make_block_ptr(k + (boc * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
     p_v = tl.make_block_ptr(v + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
     p_dk = tl.make_block_ptr(dk + (i_v * all*H + boc * H + i_h) * K, (TC, K), (H*K, 1), (i_c * BC, 0), (BC, BK), (1, 0))
-    p_dv = tl.make_block_ptr(dv + (i_v * all*H + boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
+    p_dv = tl.make_block_ptr(dv + (boc * H + i_h) * V, (TC, V), (H*V, 1), (i_c * BC, i_v * BV), (BC, BV), (1, 0))
 
     # [BC, BK]
     b_k = tl.load(p_k, boundary_check=(0, 1))
@@ -322,8 +328,8 @@ def parallel_nsa_compression_fwd(
     v: torch.Tensor,
     block_size: int,
     scale: float,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    token_indices: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    token_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K, V = *q.shape, v.shape[-1]
     H = k.shape[2]
@@ -378,18 +384,22 @@ def parallel_nsa_compression_bwd(
     do: torch.Tensor,
     block_size: int = 64,
     scale: float = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
-    token_indices: Optional[torch.LongTensor] = None,
+    cu_seqlens: torch.LongTensor | None = None,
+    token_indices: torch.LongTensor | None = None,
+    chunk_indices: torch.LongTensor | None = None,
 ):
     B, T, HQ, K, V = *q.shape, v.shape[-1]
+    TC = k.shape[1]
     H = k.shape[2]
     G = HQ // H
     BC = BS = block_size
-    BK = triton.next_power_of_2(K)
-    BV = min(128, triton.next_power_of_2(v.shape[-1]))
+    BK = max(triton.next_power_of_2(K), 16)
+    BV = min(128, max(triton.next_power_of_2(v.shape[-1]), 16))
     NV = triton.cdiv(V, BV)
     if cu_seqlens is not None:
-        chunk_indices, chunk_offsets = prepare_chunk_indices(cu_seqlens, BS), prepare_chunk_offsets(cu_seqlens, BS)
+        chunk_offsets = prepare_chunk_offsets(cu_seqlens, BS)
+        if chunk_indices is None:
+            chunk_indices = prepare_chunk_indices(chunk_offsets, BC)
         NC = len(chunk_indices)
     else:
         chunk_indices, chunk_offsets = None, None
@@ -421,7 +431,7 @@ def parallel_nsa_compression_bwd(
         BC=BC,
         BS=BS,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     dq = dq.sum(0)
 
@@ -443,6 +453,7 @@ def parallel_nsa_compression_bwd(
         chunk_offsets=chunk_offsets,
         scale=scale,
         T=T,
+        TC=TC,
         B=B,
         H=H,
         HQ=HQ,
@@ -452,7 +463,7 @@ def parallel_nsa_compression_bwd(
         BC=BC,
         BS=BS,
         BK=BK,
-        BV=BV
+        BV=BV,
     )
     dk = dk.sum(0)
     return dq, dk, dv
@@ -470,7 +481,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
         v,
         block_size,
         scale,
-        cu_seqlens
+        cu_seqlens,
     ):
         ctx.dtype = q.dtype
 
@@ -487,7 +498,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
             block_size=block_size,
             scale=scale,
             cu_seqlens=cu_seqlens,
-            token_indices=token_indices
+            token_indices=token_indices,
         )
         ctx.save_for_backward(q, k, v, o, lse)
         ctx.cu_seqlens = cu_seqlens
@@ -511,7 +522,7 @@ class ParallelNSACompressionFunction(torch.autograd.Function):
             block_size=ctx.block_size,
             scale=ctx.scale,
             cu_seqlens=ctx.cu_seqlens,
-            token_indices=ctx.token_indices
+            token_indices=ctx.token_indices,
         )
         return dq.to(q), dk.to(k), dv.to(v), None, None, None
 
@@ -522,7 +533,7 @@ def parallel_nsa_compression(
     v: torch.Tensor,
     block_size: int = 64,
     scale: float = None,
-    cu_seqlens: Optional[torch.LongTensor] = None
+    cu_seqlens: torch.LongTensor | None = None,
 ):
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -532,5 +543,5 @@ def parallel_nsa_compression(
         v,
         block_size,
         scale,
-        cu_seqlens
+        cu_seqlens,
     )

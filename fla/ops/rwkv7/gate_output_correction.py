@@ -1,10 +1,15 @@
-# -*- coding: utf-8 -*-
+# Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+# For a list of all contributors, visit:
+#   https://github.com/fla-org/flash-linear-attention/graphs/contributors
 
 import torch
 import triton
 import triton.language as tl
 
-from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, autotune_cache_kwargs, input_guard
 
 
 def gate_output_correction_ref(
@@ -63,6 +68,7 @@ def gate_output_correction_backward_ref(grad_output, o, r, k, r_k, v, g):
         for BT in [2, 4, 8]
     ],
     key=['num_heads', 'head_dim', 'BLOCK_SIZE_D'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def gate_output_correction_fwd_kernel(
@@ -114,6 +120,7 @@ def gate_output_correction_fwd_kernel(
         for BT in [2, 4, 8]
     ],
     key=['num_heads', 'head_dim', 'BLOCK_SIZE_D'],
+    **autotune_cache_kwargs,
 )
 @triton.jit
 def gate_output_correction_bwd_kernel(
@@ -229,7 +236,7 @@ class GateOutputCorrection(torch.autograd.Function):
                 v.stride(0), v.stride(1), v.stride(2),
                 r_k.stride(0),
                 T_SIZE, T_OFFSET,
-                num_heads, head_dim, BLOCK_SIZE_D=triton.next_power_of_2(head_dim)
+                num_heads, head_dim, BLOCK_SIZE_D=triton.next_power_of_2(head_dim),
             )
         return output
 
