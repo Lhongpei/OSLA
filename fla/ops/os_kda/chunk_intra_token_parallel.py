@@ -31,6 +31,7 @@ from fla.utils import autotune_cache_kwargs
 def chunk_kda_fwd_kernel_intra_token_parallel(
     q,
     k,
+    d,
     g,
     beta,
     Aqk,
@@ -81,6 +82,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
 
     q += bos * H*K
     k += bos * H*K
+    d += bos * H*K  
     g += bos * H*K
     Aqk += bos * H*BT
     Akk += bos * H*BC
@@ -96,22 +98,28 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     p_k = tl.make_block_ptr(k + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
     p_g = tl.make_block_ptr(g + i_t * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
     p_beta = tl.make_block_ptr(beta + i_t * H, (H,), (1,), (i_hg * BH,), (BH,), (0,))
+    
     # [BH, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
     b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    
     b_k = b_k * tl.load(p_beta, boundary_check=(0,)).to(tl.float32)[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
         p_kj = tl.make_block_ptr(k + j * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+        p_dj = tl.make_block_ptr(d + j * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)) 
         p_gj = tl.make_block_ptr(g + j * H*K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0))
+        
         # [BH, BK]
         b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)
+        b_dj = tl.load(p_dj, boundary_check=(0, 1)).to(tl.float32) 
         b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
 
-        b_kgj = b_kj * exp2(b_g - b_gj)
+        b_kgj = b_kj * b_dj * exp2(b_g - b_gj)
 
         b_kgj = tl.where(m_k[None, :], b_kgj, 0.0)
+        
         # [BH]
         b_Aqk = tl.sum(b_q * b_kgj, axis=1) * scale
         b_Akk = tl.sum(b_k * b_kgj, axis=1) * tl.where(j < i_t, 1.0, 0.0)
@@ -125,6 +133,7 @@ def chunk_kda_fwd_intra_token_parallel(
     k: torch.Tensor,
     gk: torch.Tensor,
     beta: torch.Tensor,
+    d: torch.Tensor,
     Aqk: torch.Tensor,
     Akk: torch.Tensor,
     scale: float,
@@ -138,17 +147,6 @@ def chunk_kda_fwd_intra_token_parallel(
     Reduces wasted computation on padding.
 
     Writes directly to Aqk and Akk tensors (in-place).
-
-    Args:
-        q: [B, T, H, K]
-        k: [B, T, H, K]
-        gk: [B, T, H, K] cumsum of gates
-        beta: [B, T, H]
-        Aqk: [B, T, H, BT] output tensor to write to
-        Akk: [B, T, H, BC] output tensor for diagonal blocks (fp32)
-        scale: attention scale
-        chunk_size: BT (default 64)
-        sub_chunk_size: BC (default 16)
     """
     B, T, H, K = q.shape
     N = len(cu_seqlens) - 1 if cu_seqlens is not None else B
@@ -156,9 +154,11 @@ def chunk_kda_fwd_intra_token_parallel(
     BC = sub_chunk_size
 
     def grid(meta): return (B * T, triton.cdiv(H, meta['BH']))
+    
     chunk_kda_fwd_kernel_intra_token_parallel[grid](
         q=q,
         k=k,
+        d=d,
         g=gk,
         beta=beta,
         Aqk=Aqk,

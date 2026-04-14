@@ -1,4 +1,5 @@
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+# Copyright (c) 2026 Hongpei Li
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -36,9 +37,9 @@ def fused_recurrent_kda_fwd_kernel(
     o,
     h0,
     ht,
-    eta,          # 新增: OSGM 学习率
-    d_min,        # 新增: d_t 裁剪下界
-    d_max,        # 新增: d_t 裁剪上界
+    eta,
+    d_min,
+    d_max,
     cu_seqlens,
     ssm_state_indices,
     num_accepted_tokens,
@@ -68,8 +69,8 @@ def fused_recurrent_kda_fwd_kernel(
     USE_GATE_IN_KERNEL: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     TRANSPOSE_STATE: tl.constexpr,
-    USE_DENOMINATOR: tl.constexpr,   # 新增: 是否使用分母正则化
-    USE_D_CLAMP: tl.constexpr,       # 新增: 是否对 d 进行 clamp
+    USE_DENOMINATOR: tl.constexpr,
+    USE_D_CLAMP: tl.constexpr,
     num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -140,7 +141,6 @@ def fused_recurrent_kda_fwd_kernel(
                 p_h0 = h0 + (i_n * HV + i_hv) * K * V + o_k[:, None] * V + o_v[None, :]
         b_h += tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
-    # 🚀 在内核中初始化 OSGM 预条件向量 d_curr = 0
     b_d = tl.zeros([BK], dtype=tl.float32)
 
     for i_t in tl.range(0, T, num_stages=num_stages):
@@ -167,9 +167,6 @@ def fused_recurrent_kda_fwd_kernel(
         else:
             b_gk = b_g
 
-        # ========================================================
-        # 🚀 1. OSGM 在线超梯度更新 (完全复刻 Naive 逻辑)
-        # ========================================================
         b_k_sq = b_k * b_k
         b_k_sq_masked = tl.where(mask_k, b_k_sq, 0.0)
         
@@ -188,20 +185,15 @@ def fused_recurrent_kda_fwd_kernel(
         if USE_D_CLAMP:
             b_d_next = tl.minimum(tl.maximum(b_d_next, d_min), d_max)
 
-        # 构造用于状态吸收的 k_tilde
         b_k_update = b_k * b_d  
         
-        # 步长前移
         b_d = b_d_next
-        # ========================================================
 
-        # 2. 状态衰减
         if TRANSPOSE_STATE:
             b_h *= exp(b_gk[None, :])
         else:
             b_h *= exp(b_gk[:, None])
 
-        # 3. 计算残差 u_t = v_t - S_{t-1} k_t (注意这里使用原始的 b_k!)
         if TRANSPOSE_STATE:
             b_v -= tl.sum(b_h * b_k[None, :], 1)
         else:
@@ -214,7 +206,6 @@ def fused_recurrent_kda_fwd_kernel(
             
         b_v *= b_beta
         
-        # 4. 预条件状态吸收 S_t = S_{t-1} + u_t \tilde{k}_t^\top (使用 b_k_update)
         if TRANSPOSE_STATE:
             b_h += b_v[:, None] * b_k_update[None, :]
             b_o = tl.sum(b_h * b_q[None, :], 1)
@@ -262,10 +253,10 @@ def fused_recurrent_kda_fwd(
     dt_bias: torch.Tensor | None = None,
     initial_state: torch.Tensor | None = None,
     scale: float | None = None,
-    eta: float = 1.0,                       # 新增 OSGM 参数
-    use_denominator: bool = False,          # 新增 OSGM 参数
-    d_min: float | None = None,             # 新增 OSGM 参数
-    d_max: float | None = None,             # 新增 OSGM 参数
+    eta: float = 1.0,
+    use_denominator: bool = False,
+    d_min: float | None = None,
+    d_max: float | None = None,
     output_final_state: bool = False,
     inplace_final_state: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
@@ -324,9 +315,9 @@ def fused_recurrent_kda_fwd(
         o=out,
         h0=initial_state,
         ht=final_state,
-        eta=eta,                                   # 传入 eta
-        d_min=d_min if d_min is not None else -1e9,# 处理 None
-        d_max=d_max if d_max is not None else 1e9, # 处理 None
+        eta=eta,
+        d_min=d_min if d_min is not None else -1e9,
+        d_max=d_max if d_max is not None else 1e9, 
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
@@ -349,7 +340,7 @@ def fused_recurrent_kda_fwd(
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_GATE_IN_KERNEL=use_gate_in_kernel,
         TRANSPOSE_STATE=transpose_state_layout,
-        USE_DENOMINATOR=use_denominator,           # 传入常量
+        USE_DENOMINATOR=use_denominator,         
         num_warps=4,
         num_stages=2,
     )
@@ -367,10 +358,10 @@ def fused_recurrent_kda(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
     scale: float | None = None,
-    eta: float = 1.0,                       # 新增 OSGM 参数
-    use_denominator: bool = False,          # 新增 OSGM 参数
-    d_min: float | None = None,             # 新增 OSGM 参数
-    d_max: float | None = None,             # 新增 OSGM 参数
+    eta: float = 1.0,
+    use_denominator: bool = False,
+    d_min: float | None = None,
+    d_max: float | None = None,
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,

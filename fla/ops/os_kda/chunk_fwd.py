@@ -14,11 +14,15 @@ from fla.ops.cp.chunk_delta_h import (
     compress_h0,
 )
 from fla.ops.gla.chunk import chunk_gla_fwd_o_gk
-from fla.ops.kda.chunk_intra import chunk_kda_fwd_intra
-from fla.ops.kda.gate import kda_gate_chunk_cumsum
+from fla.ops.os_kda.chunk_intra import chunk_kda_fwd_intra
+from fla.ops.os_kda.gate import kda_gate_chunk_cumsum
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.constant import RCP_LN2
-
+from fla.ops.os_delta_rule.chunk_osgm_phase import (
+    compute_osgm_phase1_fwd,
+    compute_osgm_phase1_bwd,
+    fused_osgm_bwd_mapping
+)
 
 def chunk_kda_fwd(
     q: torch.Tensor,
@@ -29,6 +33,12 @@ def chunk_kda_fwd(
     scale: float,
     initial_state: torch.Tensor,
     output_final_state: bool,
+    eta: float = 1.0,
+    use_denominator: bool = False,
+    d_min: float | None = None,
+    d_max: float | None = None,
+    initial_d: torch.Tensor | None = None,
+    output_final_d: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
     cu_seqlens_cpu: torch.LongTensor | None = None,
     chunk_indices: torch.LongTensor | None = None,
@@ -43,42 +53,27 @@ def chunk_kda_fwd(
     cp_context: FLACPContext | None = None,
     transpose_state_layout: bool = False,
 ):
-    # Apply gate activation
     g_org = None
     if use_gate_in_kernel:
         g_org = g
         g = kda_gate_chunk_cumsum(
-            g=g_org,
-            A_log=A_log,
-            dt_bias=dt_bias,
-            scale=RCP_LN2,
-            chunk_size=chunk_size,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            lower_bound=lower_bound,
+            g=g_org, A_log=A_log, dt_bias=dt_bias, scale=RCP_LN2, chunk_size=chunk_size,
+            cu_seqlens=cu_seqlens, chunk_indices=chunk_indices, lower_bound=lower_bound,
         )
     else:
-        g = chunk_local_cumsum(
-            g=g,
-            scale=RCP_LN2,
-            chunk_size=chunk_size,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices
-        )
+        g = chunk_local_cumsum(g=g, scale=RCP_LN2, chunk_size=chunk_size, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices)
 
-    # qg = None if disable_recompute is False
+    d, final_d = compute_osgm_phase1_fwd(
+        k=k, eta=eta, use_denominator=use_denominator, 
+        d_min=d_min, d_max=d_max, cu_seqlens=cu_seqlens, 
+        initial_d=initial_d, output_final_state=output_final_d
+    )
+
     w, u, qg, kg, Aqk, Akk = chunk_kda_fwd_intra(
-        q=q,
-        k=k,
-        v=v,
-        gk=g,
-        beta=beta,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        safe_gate=safe_gate,
-        disable_recompute=disable_recompute
+        q=q, k=k, v=v, gk=g, beta=beta, scale=scale, 
+        d=d,
+        cu_seqlens=cu_seqlens, chunk_size=chunk_size, chunk_indices=chunk_indices,
+        safe_gate=safe_gate, disable_recompute=disable_recompute
     )
 
     if cp_context is not None:
@@ -95,45 +90,24 @@ def chunk_kda_fwd(
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
-        k=kg,
-        w=w,
-        u=u,
-        gk=g,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        cu_seqlens_cpu=cu_seqlens_cpu,
-        chunk_indices=chunk_indices,
-        use_exp2=True,
-        transpose_state_layout=transpose_state_layout,
+        k=kg, w=w, u=u, gk=g, initial_state=initial_state, output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu, chunk_indices=chunk_indices,
+        use_exp2=True, transpose_state_layout=transpose_state_layout,
     )
 
     if cp_context is not None:
-        # In Context Parallel (CP) mode, global initial states are not supported at the entry point.
-        # The `initial_state` here is computed internally via inter-rank communication.
-        # Since only the first sequence in the local batch can be a continuation of a cross-rank sequence,
-        # only the first state in the tensor is relevant. We compress it to optimize memory for `save_for_backward`.
         initial_state = compress_h0(initial_state, context=cp_context)
 
     o = chunk_gla_fwd_o_gk(
-        q=q,
-        v=v_new,
-        g=g,
-        A=Aqk,
-        h=h,
-        scale=scale,
-        cu_seqlens=cu_seqlens,
-        chunk_size=chunk_size,
-        chunk_indices=chunk_indices,
-        use_exp2=True,
-        transpose_state_layout=transpose_state_layout,
+        q=q, v=v_new, g=g, A=Aqk, h=h, scale=scale, cu_seqlens=cu_seqlens, 
+        chunk_size=chunk_size, chunk_indices=chunk_indices, use_exp2=True, transpose_state_layout=transpose_state_layout,
     )
+    
     if disable_recompute is False:
-        # Delete to save memory
         w, u, qg, kg, v_new = None, None, None, None, None
         if not return_intermediate_states:
-            # Only delete h if not requested for inference
             h = None
         if use_gate_in_kernel:
             g = None
-    return o, final_state, g, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state
+            
+    return o, final_state, g, Aqk, Akk, w, u, qg, kg, v_new, h, initial_state, d, final_d
