@@ -47,6 +47,11 @@ class OSDNConfig(PretrainedConfig):
         osgm_use_denominator: bool = None,
         osgm_d_min: float = None,
         osgm_d_max: float = None,
+        osgm_decay: bool = False,
+        osgm_decay_mode: str = "none",
+        osgm_decay_gamma: float = 0.999,
+        osgm_ema_alpha: float = 0.999,
+        osgm_ema_normalize: bool = False,
         **kwargs
     ):
         self.attn_mode = attn_mode
@@ -81,6 +86,14 @@ class OSDNConfig(PretrainedConfig):
         self.osgm_use_denominator = osgm_use_denominator
         self.osgm_d_min = osgm_d_min
         self.osgm_d_max = osgm_d_max
+        self.osgm_decay = osgm_decay
+        # Backward compat: map old osgm_decay=True to osgm_decay_mode="learnable"
+        if osgm_decay and osgm_decay_mode == "none":
+            osgm_decay_mode = "learnable"
+        self.osgm_decay_mode = osgm_decay_mode
+        self.osgm_decay_gamma = osgm_decay_gamma
+        self.osgm_ema_alpha = osgm_ema_alpha
+        self.osgm_ema_normalize = osgm_ema_normalize
 
         if attn is not None:
             if not isinstance(attn, Dict):

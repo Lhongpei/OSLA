@@ -71,6 +71,11 @@ class OSLABlock(nn.Module):
                 osgm_use_denominator=getattr(config, 'osgm_use_denominator', None),
                 osgm_d_min=getattr(config, 'osgm_d_min', None),
                 osgm_d_max=getattr(config, 'osgm_d_max', None),
+                osgm_decay=getattr(config, 'osgm_decay', False),
+                osgm_decay_mode=getattr(config, 'osgm_decay_mode', 'none'),
+                osgm_decay_gamma=getattr(config, 'osgm_decay_gamma', 0.999),
+                osgm_ema_alpha=getattr(config, 'osgm_ema_alpha', 0.999),
+                osgm_ema_normalize=getattr(config, 'osgm_ema_normalize', False),
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = DeltaNetMLP(
@@ -139,6 +144,10 @@ class OSLAPreTrainedModel(PreTrainedModel):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
+        if isinstance(module, DeltaNet) and hasattr(module, 'osgm_a_proj'):
+            # Re-init a_proj for data-dependent decay: zero weight, bias=6.9 so initial gamma≈0.999
+            nn.init.zeros_(module.osgm_a_proj.weight)
+            nn.init.constant_(module.osgm_a_proj.bias, 6.9)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
         elif hasattr(module, 'reset_parameters'):

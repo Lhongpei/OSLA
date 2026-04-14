@@ -22,6 +22,12 @@ from fla.ops.os_delta_rule.fused_recurrent import fused_recurrent_delta_rule as 
 from fla.ops.os_delta_rule.chunk import chunk_os_delta_rule
 from fla.ops.os_delta_rule.fused_recurrent_osgm import fused_recurrent_delta_rule_osgm
 from fla.ops.os_delta_rule.chunk_osgm import chunk_delta_rule_osgm
+from fla.ops.os_delta_rule.fused_recurrent_osgm_decay import fused_recurrent_delta_rule_osgm_decay
+from fla.ops.os_delta_rule.chunk_osgm_decay import chunk_delta_rule_osgm_decay
+from fla.ops.os_delta_rule.fused_recurrent_osgm_dd_decay import fused_recurrent_delta_rule_osgm_dd_decay
+from fla.ops.os_delta_rule.chunk_osgm_dd_decay import chunk_delta_rule_osgm_dd_decay
+from fla.ops.os_delta_rule.fused_recurrent_ema import fused_recurrent_delta_rule_ema
+from fla.ops.os_delta_rule.chunk_osgm_ema import chunk_delta_rule_ema
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -102,6 +108,11 @@ class DeltaNet(nn.Module):
         osgm_use_denominator: bool = None,
         osgm_d_min: float = None,
         osgm_d_max: float = None,
+        osgm_decay: bool = False,
+        osgm_decay_mode: str = "none",
+        osgm_decay_gamma: float = 0.999,
+        osgm_ema_alpha: float = 0.999,
+        osgm_ema_normalize: bool = False,
         **kwargs
     ) -> DeltaNet:
         super().__init__()
@@ -111,10 +122,18 @@ class DeltaNet(nn.Module):
         self.qk_norm = qk_norm
         self.use_osla = use_osla
         self.use_osgm = use_osgm
+        self.osgm_decay = osgm_decay
+        # Backward compat: map old osgm_decay=True to mode="learnable"
+        if osgm_decay and osgm_decay_mode == "none":
+            osgm_decay_mode = "learnable"
+        self.osgm_decay_mode = osgm_decay_mode
+        self.osgm_decay_gamma = osgm_decay_gamma
         self.osgm_eta = osgm_eta
         self.osgm_use_denominator = osgm_use_denominator
         self.osgm_d_min = osgm_d_min
         self.osgm_d_max = osgm_d_max
+        self.osgm_ema_alpha = osgm_ema_alpha
+        self.osgm_ema_normalize = osgm_ema_normalize
 
         assert self.qk_activation in ['silu', 'relu', 'elu', 'identity']
         assert self.qk_norm in ['l2', 'sum']
@@ -184,7 +203,24 @@ class DeltaNet(nn.Module):
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
         if use_osla or use_osgm:
-            self.initial_scale = nn.Parameter(torch.zeros(num_heads, self.head_k_dim))
+            if self.osgm_decay_mode in ("ema", "ema_norm"):
+                # EMA state starts at 1.0 so d≈1 and <d,k²>≈1 for L2-normed keys.
+                # Buffer (not Parameter) since d is detached — no gradient through EMA.
+                self.register_buffer('initial_scale', torch.ones(num_heads, self.head_k_dim))
+            else:
+                self.initial_scale = nn.Parameter(torch.zeros(num_heads, self.head_k_dim))
+        if use_osgm and self.osgm_decay_mode == "learnable":
+            self.osgm_gamma_log = nn.Parameter(torch.full((num_heads,), 6.9))
+            self.osgm_gamma_log._no_weight_decay = True
+        elif use_osgm and self.osgm_decay_mode == "constant":
+            import math
+            gamma_log_val = math.log(osgm_decay_gamma / (1.0 - osgm_decay_gamma))
+            self.register_buffer('osgm_gamma_log', torch.full((num_heads,), gamma_log_val))
+        elif use_osgm and self.osgm_decay_mode == "data_dependent":
+            self.osgm_a_proj = nn.Linear(hidden_size, num_heads, bias=True)
+            # Init bias so initial decay ≈ 0.999 (logsigmoid(6.9) ≈ -0.001)
+            nn.init.zeros_(self.osgm_a_proj.weight)
+            nn.init.constant_(self.osgm_a_proj.bias, 6.9)
 
     def forward(
         self,
@@ -274,7 +310,47 @@ class DeltaNet(nn.Module):
                 N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
                 initial_scale = self.initial_scale.unsqueeze(0).expand(N, -1, -1).contiguous().float()
         if mode == 'fused_recurrent':
-            if use_osgm:
+            if use_osgm and self.osgm_decay_mode in ("ema", "ema_norm"):
+                o, recurrent_state = fused_recurrent_delta_rule_ema(
+                    q=q, k=k, v=v, beta=beta,
+                    alpha=self.osgm_ema_alpha,
+                    normalize=(self.osgm_decay_mode == "ema_norm"),
+                    initial_state=intial_state,
+                    initial_ema=initial_scale,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=use_l2norm,
+                )
+            elif use_osgm and self.osgm_decay_mode == "data_dependent":
+                g = F.logsigmoid(self.osgm_a_proj(hidden_states))  # [B, T, H]
+                o, recurrent_state = fused_recurrent_delta_rule_osgm_dd_decay(
+                    q=q, k=k, v=v, beta=beta,
+                    g=g,
+                    eta=self.osgm_eta,
+                    initial_state=intial_state,
+                    initial_scale=initial_scale,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=use_l2norm,
+                    use_denominator=self.osgm_use_denominator,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                )
+            elif use_osgm and self.osgm_decay_mode in ("learnable", "constant"):
+                o, recurrent_state = fused_recurrent_delta_rule_osgm_decay(
+                    q=q, k=k, v=v, beta=beta,
+                    gamma_log=self.osgm_gamma_log,
+                    eta=self.osgm_eta,
+                    initial_state=intial_state,
+                    initial_scale=initial_scale,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=use_l2norm,
+                    use_denominator=self.osgm_use_denominator,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                )
+            elif use_osgm:
                 o, recurrent_state = fused_recurrent_delta_rule_osgm(
                     q=q,
                     k=k,
@@ -314,7 +390,44 @@ class DeltaNet(nn.Module):
                     use_qk_l2norm_in_kernel=use_l2norm,
                 )
         elif mode == 'chunk':
-            if use_osgm:
+            if use_osgm and self.osgm_decay_mode in ("ema", "ema_norm"):
+                o, recurrent_state = chunk_delta_rule_ema(
+                    q=q, k=k, v=v, beta=beta,
+                    alpha=self.osgm_ema_alpha,
+                    normalize=(self.osgm_decay_mode == "ema_norm"),
+                    initial_state=(intial_state, initial_scale),
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=use_l2norm,
+                )
+            elif use_osgm and self.osgm_decay_mode == "data_dependent":
+                g = F.logsigmoid(self.osgm_a_proj(hidden_states))
+                o, recurrent_state = chunk_delta_rule_osgm_dd_decay(
+                    q=q, k=k, v=v, beta=beta,
+                    g=g,
+                    eta=self.osgm_eta,
+                    initial_state=(intial_state, initial_scale),
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=use_l2norm,
+                    use_denominator=self.osgm_use_denominator,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                )
+            elif use_osgm and self.osgm_decay_mode in ("learnable", "constant"):
+                o, recurrent_state = chunk_delta_rule_osgm_decay(
+                    q=q, k=k, v=v, beta=beta,
+                    gamma_log=self.osgm_gamma_log,
+                    eta=self.osgm_eta,
+                    initial_state=(intial_state, initial_scale),
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=use_l2norm,
+                    use_denominator=self.osgm_use_denominator,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                )
+            elif use_osgm:
                 o, recurrent_state = chunk_delta_rule_osgm(
                     q=q,
                     k=k,

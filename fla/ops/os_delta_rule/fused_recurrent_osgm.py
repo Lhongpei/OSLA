@@ -479,7 +479,7 @@ def fused_recurrent_delta_rule_osgm(
         if eta is None: eta = 1.0
         if use_denominator is None: use_denominator = False
         if d_min is None: d_min = 0.0
-        if d_max is None: d_max = 2.0
+        if d_max is None: d_max = 1e9
     else:
         if eta is None: eta = 0.1 
         if use_denominator is None: use_denominator = True

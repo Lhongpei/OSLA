@@ -1,34 +1,27 @@
 # -*- coding: utf-8 -*-
-# Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
-# Copyright (c) 2026, Hongpei Li
+# Chunk-mode OSGM with data-dependent (per-token per-head) decay on preconditioner D.
+# Based on chunk_osgm_decay.py but uses per-token decay from a_proj.
 
-import warnings
 from typing import Optional
 
 import torch
 
 from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
 from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
-from fla.ops.common.chunk_o import chunk_bwd_dqkwg, chunk_bwd_dv_local, chunk_fwd_o
+from fla.ops.common.chunk_o import chunk_bwd_dv_local, chunk_bwd_dqkwg, chunk_fwd_o
 from fla.ops.os_delta_rule.wy_fast_os import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
+from fla.ops.os_delta_rule.chunk_osgm_phase import fused_osgm_bwd_mapping
+from fla.ops.os_delta_rule.chunk_osgm_phase_dd_decay import (
+    compute_osgm_dd_decay_phase1_fwd,
+    compute_osgm_dd_decay_phase1_bwd,
+)
 from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
-from fla.ops.os_delta_rule.chunk_osgm_phase import (
-    compute_osgm_phase1_fwd as compute_osgm_phase1_fwd_rec, 
-    compute_osgm_phase1_bwd as compute_osgm_phase1_bwd_rec,
-    fused_osgm_bwd_mapping
-)
-
-from fla.ops.os_delta_rule.chunk_osgm_phase_wy import (
-    compute_osgm_phase1_fwd_wy,
-    compute_osgm_phase1_bwd_wy
-)
 
 def chunk_delta_rule_fwd(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, d: torch.Tensor, beta: torch.Tensor, scale: float,
-    initial_state: torch.Tensor, output_final_state: bool, cu_seqlens: Optional[torch.LongTensor] = None,
+    q, k, v, d, beta, scale, initial_state, output_final_state, cu_seqlens=None,
 ):
-    kw = k * d 
+    kw = k * d
     w, u, A = prepare_wy_repr_fwd(k=k, v=v, beta=beta, d=d, cu_seqlens=cu_seqlens)
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=kw, w=w, u=u, g=None, initial_state=initial_state,
@@ -39,8 +32,7 @@ def chunk_delta_rule_fwd(
 
 
 def chunk_delta_rule_bwd(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, d: torch.Tensor, beta: torch.Tensor, A: torch.Tensor, scale: float,
-    initial_state: torch.Tensor, do: torch.Tensor, dht: torch.Tensor, cu_seqlens: Optional[torch.LongTensor] = None,
+    q, k, v, d, beta, A, scale, initial_state, do, dht, cu_seqlens=None,
 ):
     kw = k * d
     w, u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, cu_seqlens=cu_seqlens)
@@ -64,15 +56,15 @@ def chunk_delta_rule_bwd(
     return dq, dk, dv, db, dh0, dd
 
 
-class ChunkDeltaRuleFunction(torch.autograd.Function):
+class ChunkDeltaRuleDDDecayFunction(torch.autograd.Function):
 
     @staticmethod
     @input_guard
     @autocast_custom_fwd
     def forward(
-        ctx, q, k, v, beta, scale, eta, initial_h, initial_d, output_final_state,
-        use_qk_l2norm_in_kernel, cu_seqlens, use_denominator, d_min, d_max,
-        use_wy_fast
+        ctx, q, k, v, beta, g, scale, eta, initial_h, initial_d,
+        output_final_state, use_qk_l2norm_in_kernel, cu_seqlens,
+        use_denominator, d_min, d_max,
     ):
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
@@ -80,16 +72,10 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
         else:
             q_rstd, k_rstd = None, None
 
-        if use_wy_fast:
-            d, final_d, W, d_starts_bh = compute_osgm_phase1_fwd_wy(
-                k, eta, use_denominator, d_min, d_max, cu_seqlens, initial_d, output_final_state
-            )
-            extra_tensors = (W, d_starts_bh)
-        else:
-            d, final_d = compute_osgm_phase1_fwd_rec(
-                k, eta, use_denominator, d_min, d_max, cu_seqlens, initial_d, output_final_state
-            )
-            extra_tensors = ()
+        d, final_d = compute_osgm_dd_decay_phase1_fwd(
+            k, g, eta, use_denominator, d_min, d_max,
+            cu_seqlens, initial_d, output_final_state
+        )
 
         o, A, final_h = chunk_delta_rule_fwd(
             q=q, k=k, v=v, d=d, beta=beta, scale=scale,
@@ -97,63 +83,61 @@ class ChunkDeltaRuleFunction(torch.autograd.Function):
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
         )
-        
-        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, d, beta, A, initial_h, *extra_tensors)
-        
-        ctx.scale = scale; ctx.eta = eta; ctx.cu_seqlens = cu_seqlens
+
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, d, beta, A, g, initial_h)
+
+        ctx.scale = scale
+        ctx.eta = eta
+        ctx.cu_seqlens = cu_seqlens
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        ctx.use_denominator = use_denominator; ctx.d_min = d_min; ctx.d_max = d_max
+        ctx.use_denominator = use_denominator
+        ctx.d_min = d_min
+        ctx.d_max = d_max
         ctx.has_initial_d = (initial_d is not None)
-        ctx.use_wy_fast = use_wy_fast
-        
+
         return o.to(q.dtype), final_h, final_d
 
     @staticmethod
     @input_guard
     @autocast_custom_bwd
     def backward(ctx, do, dh_final, dd_final):
-        saved = ctx.saved_tensors
-        q, q_rstd, k, k_rstd, v, d, beta, A, initial_h = saved[:9]
-        extra_tensors = saved[9:]
+        q, q_rstd, k, k_rstd, v, d, beta, A, g, initial_h = ctx.saved_tensors
 
         dq, dk_phase2, dv, db, dh0, dd = chunk_delta_rule_bwd(
             q=q, k=k, v=v, d=d, beta=beta, A=A, scale=ctx.scale,
             initial_state=initial_h, do=do, dht=dh_final, cu_seqlens=ctx.cu_seqlens
         )
-        
-        if ctx.use_wy_fast:
-            W, d_starts_bh = extra_tensors
-            dk_phase1, dd0 = compute_osgm_phase1_bwd_wy(
-                k, d, dd, ctx.eta, ctx.use_denominator, ctx.d_min, ctx.d_max, ctx.cu_seqlens,
-                dd_final, ctx.has_initial_d, W, d_starts_bh
-            )
-        else:
-            dk_phase1, dd0 = compute_osgm_phase1_bwd_rec(
-                k, d, dd, ctx.eta, ctx.use_denominator, ctx.d_min, ctx.d_max, ctx.cu_seqlens,
-                dd_final=dd_final, output_initial_state_gradient=ctx.has_initial_d
-            )
-            
+
+        dk_phase1, dd0, dg = compute_osgm_dd_decay_phase1_bwd(
+            k, g, d, dd, ctx.eta, ctx.use_denominator,
+            ctx.d_min, ctx.d_max, ctx.cu_seqlens,
+            dd_final=dd_final,
+            output_initial_state_gradient=ctx.has_initial_d
+        )
+
         dk = dk_phase2 + dk_phase1
 
         if ctx.use_qk_l2norm_in_kernel:
             dq = l2norm_bwd(q, q_rstd, dq)
             dk = l2norm_bwd(k, k_rstd, dk)
-            
-        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype), None, None, dh0, dd0, None, None, None, None, None, None, None
+
+        return (
+            dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype),
+            dg,  # gradient for g [B, T, H]
+            None, None, dh0, dd0, None, None, None, None, None, None
+        )
 
 
 @torch.compiler.disable
-def chunk_delta_rule_osgm(
+def chunk_delta_rule_osgm_dd_decay(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, beta: torch.Tensor,
+    g: torch.Tensor,
     scale: float = None, eta: float = None,
-    initial_state: torch.Tensor = None, output_final_state: bool = False,
+    initial_state=None, output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: Optional[torch.LongTensor] = None,
     use_denominator: bool = None,
-    d_min: float = None,
-    d_max: float = None,
-    head_first: bool = False,
-    use_wy_fast: bool = False,
+    d_min: float = None, d_max: float = None,
 ):
     if use_qk_l2norm_in_kernel:
         if eta is None: eta = 1.0
@@ -161,25 +145,24 @@ def chunk_delta_rule_osgm(
         if d_min is None: d_min = 0.0
         if d_max is None: d_max = 1e9
     else:
-        if eta is None: eta = 0.1 
+        if eta is None: eta = 0.1
         if use_denominator is None: use_denominator = True
 
     scale = k.shape[-1] ** -0.5 if scale is None else scale
-    
+
     initial_h, initial_d = None, None
     if initial_state is not None:
         if isinstance(initial_state, tuple):
             initial_h, initial_d = initial_state
         else:
             initial_h = initial_state
-            
-    o, final_h, final_d = ChunkDeltaRuleFunction.apply(
-        q, k, v, beta, scale, eta, initial_h, initial_d, output_final_state,
-        use_qk_l2norm_in_kernel, cu_seqlens,
+
+    o, final_h, final_d = ChunkDeltaRuleDDDecayFunction.apply(
+        q, k, v, beta, g, scale, eta, initial_h, initial_d,
+        output_final_state, use_qk_l2norm_in_kernel, cu_seqlens,
         use_denominator, d_min, d_max,
-        use_wy_fast
     )
-    
+
     if output_final_state:
         return o, (final_h, final_d)
     return o, None
