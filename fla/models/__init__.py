@@ -32,6 +32,7 @@ from fla.models.mla import MLAConfig, MLAForCausalLM, MLAModel
 from fla.models.mom import MomConfig, MomForCausalLM, MomModel
 from fla.models.nsa import NSAConfig, NSAForCausalLM, NSAModel
 from fla.models.os_delta_net import OSDNConfig, OSDNForCausalLM, OSDNModel
+from fla.models.os_gated_deltanet import OSGDNConfig, OSGDNForCausalLM, OSGDNModel
 from fla.models.path_attn import PaTHAttentionConfig, PaTHAttentionForCausalLM, PaTHAttentionModel
 from fla.models.retnet import RetNetConfig, RetNetForCausalLM, RetNetModel
 from fla.models.rodimus import RodimusConfig, RodimusForCausalLM, RodimusModel
@@ -129,4 +130,5 @@ __all__ = [
     'TransformerForCausalLM',
     'TransformerModel',
     'OSDNConfig', 'OSDNForCausalLM', 'OSDNModel',
+    'OSGDNConfig', 'OSGDNForCausalLM', 'OSGDNModel',
 ]

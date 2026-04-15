@@ -20,6 +20,7 @@ from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, 
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate
+from fla.ops.os_gated_delta_rule import chunk_os_gated_delta_rule
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -100,6 +101,14 @@ class GatedDeltaNet(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        # --- OSGM (OS-GDN) options ---
+        use_osgm: bool = False,
+        osgm_eta: float | None = None,
+        osgm_use_denominator: bool | None = None,
+        osgm_d_min: float | None = None,
+        osgm_d_max: float | None = None,
+        osgm_decay_mode: str = "none",      # "none"|"learnable"|"constant"|"data_dependent"
+        osgm_decay_gamma: float = 0.999,    # only used when decay_mode="constant"
         **kwargs,
     ) -> GatedDeltaNet:
         super().__init__()
@@ -113,6 +122,15 @@ class GatedDeltaNet(nn.Module):
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
         self.conv_bias = conv_bias
+
+        # OSGM config
+        self.use_osgm = use_osgm
+        self.osgm_eta = osgm_eta
+        self.osgm_use_denominator = osgm_use_denominator
+        self.osgm_d_min = osgm_d_min
+        self.osgm_d_max = osgm_d_max
+        self.osgm_decay_mode = osgm_decay_mode
+        self.osgm_decay_gamma = osgm_decay_gamma
 
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -199,6 +217,39 @@ class GatedDeltaNet(nn.Module):
             self.o_norm = RMSNorm(self.head_v_dim, eps=norm_eps, dtype=torch.float32)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
+        if self.use_osgm:
+            # OSGM initial preconditioner d_0, learnable per-head.
+            self.initial_scale = nn.Parameter(
+                torch.zeros(self.num_v_heads, self.head_k_dim)
+            )
+            # Decay-mode-specific parameters (mirror delta_net.py conventions).
+            if self.osgm_decay_mode == "learnable":
+                # γ = sigmoid(gamma_log); init to ~0.999 (logit(0.999) ≈ 6.9).
+                self.osgm_gamma_log = nn.Parameter(
+                    torch.full((self.num_v_heads,), 6.9)
+                )
+                self.osgm_gamma_log._no_weight_decay = True
+            elif self.osgm_decay_mode == "constant":
+                gamma = float(self.osgm_decay_gamma)
+                gamma_log_val = math.log(gamma / (1.0 - gamma))
+                self.register_buffer(
+                    'osgm_gamma_log',
+                    torch.full((self.num_v_heads,), gamma_log_val),
+                )
+            elif self.osgm_decay_mode == "data_dependent":
+                # Data-dependent γ_t = σ(osgm_a_proj(h)): separate from GDN's a_proj.
+                self.osgm_a_proj = nn.Linear(
+                    hidden_size, self.num_v_heads, bias=True
+                )
+                # Init so initial γ ≈ 0.999 (logsigmoid(6.9) ≈ -0.001).
+                nn.init.zeros_(self.osgm_a_proj.weight)
+                nn.init.constant_(self.osgm_a_proj.bias, 6.9)
+            elif self.osgm_decay_mode not in ("none",):
+                raise ValueError(
+                    f"unknown osgm_decay_mode={self.osgm_decay_mode!r}. "
+                    f"Expected one of: none, learnable, constant, data_dependent."
+                )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -263,7 +314,51 @@ class GatedDeltaNet(nn.Module):
             beta = beta * 2.
 
         recurrent_state = last_state['recurrent_state'] if last_state is not None else None
-        if mode == 'chunk':
+        if self.use_osgm and mode == 'chunk':
+            # OSGM branch (OS-GDN): d trajectory + state forget gate.
+            initial_h, initial_d = (
+                recurrent_state if isinstance(recurrent_state, tuple)
+                else (recurrent_state, None)
+            )
+            if initial_d is None:
+                N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
+                initial_d = (
+                    self.initial_scale
+                    .unsqueeze(0).expand(N, -1, -1).contiguous().float()
+                )
+            # Pre-activate gate outside the kernel (chunk_os_gated_delta_rule
+            # expects pre-computed raw log-decay, not raw a_proj output).
+            g = fused_gdn_gate(
+                g=self.a_proj(hidden_states),
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+            )
+            # d-decay arguments, per mode.
+            gamma_log = None
+            g_decay = None
+            if self.osgm_decay_mode in ("learnable", "constant"):
+                gamma_log = self.osgm_gamma_log
+            elif self.osgm_decay_mode == "data_dependent":
+                g_decay = F.logsigmoid(self.osgm_a_proj(hidden_states))  # [B,T,H]
+            o, recurrent_state = chunk_os_gated_delta_rule(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                initial_state=(initial_h, initial_d),
+                output_final_state=use_cache,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=True,
+                eta=self.osgm_eta,
+                use_denominator=self.osgm_use_denominator,
+                d_min=self.osgm_d_min,
+                d_max=self.osgm_d_max,
+                decay_mode=self.osgm_decay_mode,
+                gamma_log=gamma_log,
+                g_decay=g_decay,
+            )
+        elif mode == 'chunk':
             o, recurrent_state = chunk_gated_delta_rule(
                 q=q,
                 k=k,
@@ -279,6 +374,11 @@ class GatedDeltaNet(nn.Module):
                 dt_bias=self.dt_bias,
             )
         elif mode == 'fused_recurrent':
+            if self.use_osgm:
+                raise NotImplementedError(
+                    "OS-GDN (use_osgm=True) does not have a fused_recurrent inference kernel yet. "
+                    "Use chunk mode for training and inference, or extend `fla.ops.os_gated_delta_rule`."
+                )
             g = fused_gdn_gate(g=self.a_proj(hidden_states), A_log=self.A_log, dt_bias=self.dt_bias)
             o, recurrent_state = fused_recurrent_gated_delta_rule(
                 q=q,
