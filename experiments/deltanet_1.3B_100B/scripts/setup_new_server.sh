@@ -29,7 +29,7 @@ set -e
 OSLA_ROOT=${OSLA_ROOT:-/data0/OSLA}
 CONDA_HOME=${CONDA_HOME:-$HOME/anaconda3}
 OSLA_REPO=${OSLA_REPO:-git@github.com:Lhongpei/OSLA.git}
-OSLA_BRANCH=${OSLA_BRANCH:-osla-osgm-dd-decay-1.3B}
+OSLA_BRANCH=${OSLA_BRANCH:-main}
 FLAME_REPO=${FLAME_REPO:-https://github.com/fla-org/flame.git}
 FLAME_COMMIT=${FLAME_COMMIT:-e11e7be75b9e45e84dbecbe8f0efa27d6af7d101}
 ENV_NAME=${ENV_NAME:-osla}
