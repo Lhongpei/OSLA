@@ -7,26 +7,30 @@
 
 set -e
 
-source /home/datagen/anaconda3/etc/profile.d/conda.sh
-conda activate osla
+source /opt/conda/etc/profile.d/conda.sh
+conda activate /home/notebook/data/personal/S9062960/conda_envs/osla
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HUB_DOWNLOAD_TIMEOUT=300
+export HF_HUB_OFFLINE=1
 export NCCL_DEBUG=WARN
 export NCCL_NVLS_ENABLE=0
 export NCCL_P2P_LEVEL=NVL
 export NCCL_P2P_DISABLE=0
 export WANDB_PROJECT=deltanet_1.3B_100B
 export WANDB_NAME=osla-osgm-dd-decay-1.3B
+export HF_HOME=/home/notebook/data/personal/S9062960/.cache/huggingface
+export PIP_CACHE_DIR=/home/notebook/data/personal/S9062960/.cache/pip
+export WANDB_CONFIG_DIR=/home/notebook/data/personal/S9062960/.config/wandb
 
-DUMP=/data0/OSLA/experiments/deltanet_1.3B_100B/exp/osla-osgm-dd-decay-1.3B
-CONFIG=/data0/OSLA/experiments/deltanet_1.3B_100B/configs/osla_osgm_dd_decay_1.3B.json
+DUMP=/home/notebook/data/personal/S9062960/experiments/deltanet_1.3B_100B/exp/osla-osgm-dd-decay-1.3B
+CONFIG=/home/notebook/code/personal/S9062960/OSLA/experiments/deltanet_1.3B_100B/configs/osla_osgm_dd_decay_1.3B.json
 TOKENIZER=fla-hub/delta_net-1.3B-100B
 
 mkdir -p $DUMP/logs
 
-cd /data0/OSLA/flame
+cd /home/notebook/code/personal/S9062960/OSLA/flame
 
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 torchrun --nnodes=1 \
@@ -61,7 +65,7 @@ torchrun --nnodes=1 \
   --training.dataset HuggingFaceFW/fineweb-edu \
   --training.dataset_name sample-100BT \
   --training.dataset_split train \
-  --training.num_workers 32 \
+  --training.num_workers 4 \
   --training.prefetch_factor 2 \
   --training.seed 42 \
   --activation_checkpoint.mode full \
