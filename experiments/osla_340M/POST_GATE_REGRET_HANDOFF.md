@@ -29,19 +29,36 @@ done; we just need GPUs to run the smoke training.
 
 ## Steps on the second machine
 
+### Option A — fresh machine (no env yet)
+
 ```bash
-# 1. Get the code (assuming the repo is cloned at /data0/OSLA — adjust if not)
-cd /data0/OSLA   # or wherever your clone lives
-
+# 1. Get the code (clone or update existing repo)
+git clone git@github.com:Lhongpei/OSLA.git
+cd OSLA
 git fetch origin
-git checkout post-gate-regret-smoke   # branch pushed by Claude
+git checkout post-gate-regret-smoke
 
-# 2. (only if first time) ensure the osla conda env exists with same deps
-#    as the main box — same FLA / triton / pytorch versions.
+# 2. One-time env setup (creates `osla` conda env with pinned versions:
+#    torch 2.6.0, triton 3.2.0, transformers 4.51.3, fla -e, flame -e).
+#    Idempotent — safe to re-run; only installs what's missing.
+bash experiments/osla_340M/scripts/setup_env_post_gate_regret.sh
 
-# 3. Run the one-shot smoke
+# 3. Run the smoke (env is auto-detected and activated by the script)
 bash experiments/osla_340M/scripts/train_post_gate_regret_smoke.sh
 ```
+
+### Option B — env already exists
+
+```bash
+cd /path/to/your/OSLA   # any path; script uses git toplevel
+git fetch origin
+git checkout post-gate-regret-smoke
+bash experiments/osla_340M/scripts/train_post_gate_regret_smoke.sh
+```
+
+The smoke script auto-detects conda from common locations (`~/anaconda3`,
+`~/miniconda3`, `/opt/conda`, `$(conda info --base)`); override with
+`CONDA_BASE=...` or `CONDA_ENV=...` env vars if needed.
 
 The script:
 1. Runs three preflight pytest-style sanity scripts (~30 s)

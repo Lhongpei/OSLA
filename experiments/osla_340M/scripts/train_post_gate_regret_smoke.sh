@@ -28,19 +28,42 @@
 set -e
 
 # ===== CONFIG =====
-REPO=/data0/OSLA                           # adjust if your clone lives elsewhere
+REPO=${REPO:-$(git rev-parse --show-toplevel 2>/dev/null || echo "/data0/OSLA")}
 EXP=$REPO/experiments/osla_340M
-RUN_NAME=post-gate-regret-smoke-200steps
+RUN_NAME=${RUN_NAME:-post-gate-regret-smoke-200steps}
 DUMP=$EXP/exp/$RUN_NAME
 CONFIG=$EXP/configs/os_gated_deltanet_post_gate_regret_340M.json
-TOKENIZER=fla-hub/delta_net-1.3B-100B
+TOKENIZER=${TOKENIZER:-fla-hub/delta_net-1.3B-100B}
 N_GPUS=${N_GPUS:-8}
 N_STEPS=${N_STEPS:-200}
 RDZV_PORT=${RDZV_PORT:-29502}
+CONDA_ENV=${CONDA_ENV:-osla}
 # ==================
 
-source /home/datagen/anaconda3/etc/profile.d/conda.sh
-conda activate osla
+# --- env activation: try common conda paths, fail with helpful msg if none ---
+CONDA_BASE=""
+for candidate in \
+    "$HOME/anaconda3" "$HOME/miniconda3" "/opt/conda" \
+    "/home/datagen/anaconda3" "/usr/local/anaconda3"; do
+    if [ -f "$candidate/etc/profile.d/conda.sh" ]; then
+        CONDA_BASE="$candidate"; break
+    fi
+done
+if [ -z "$CONDA_BASE" ] && command -v conda >/dev/null 2>&1; then
+    CONDA_BASE=$(conda info --base 2>/dev/null)
+fi
+if [ -z "$CONDA_BASE" ] || [ ! -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    echo "ERROR: cannot find conda. Install miniconda or set CONDA_BASE."
+    exit 1
+fi
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+
+if ! conda env list | awk '{print $1}' | grep -qx "$CONDA_ENV"; then
+    echo "ERROR: conda env '$CONDA_ENV' not found."
+    echo "Create it first:  bash $REPO/experiments/osla_340M/scripts/setup_env_post_gate_regret.sh"
+    exit 1
+fi
+conda activate "$CONDA_ENV"
 
 cd $REPO
 
