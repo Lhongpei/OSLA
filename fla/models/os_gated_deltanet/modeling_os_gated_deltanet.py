@@ -79,6 +79,14 @@ class OSGDNBlock(GradientCheckpointingLayer):
                 osgm_d_max=getattr(config, 'osgm_d_max', None),
                 osgm_decay_mode=getattr(config, 'osgm_decay_mode', 'none'),
                 osgm_decay_gamma=getattr(config, 'osgm_decay_gamma', 0.999),
+                osgm_freeze=getattr(config, 'osgm_freeze', False),
+                gate_aware_hypergradient=getattr(config, 'gate_aware_hypergradient', False),
+                osgm_d_decay_source=getattr(config, 'osgm_d_decay_source', 'osgm'),
+                osgm_post_gate_residual=getattr(config, 'osgm_post_gate_residual', False),
+                osgm_post_gate_clamp_min=getattr(config, 'osgm_post_gate_clamp_min', None),
+                osgm_post_gate_use_remaining=getattr(config, 'osgm_post_gate_use_remaining', False),
+                osgm_post_gate_regret=getattr(config, 'osgm_post_gate_regret', False),
+                osgm_post_gate_regret_chunk_size=getattr(config, 'osgm_post_gate_regret_chunk_size', 64),
             )
         self.mlp_norm = (RMSNorm if config.fuse_norm else nn.RMSNorm)(config.hidden_size, eps=config.norm_eps)
         self.mlp = OSGDNMLP(
@@ -156,8 +164,12 @@ class OSGDNPreTrainedModel(PreTrainedModel):
         elif isinstance(module, (nn.Linear, nn.Conv1d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
-            nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
+            # Respect `_is_hf_initialized` on individual tensors — some modules
+            # (e.g. OSGM's `osgm_a_proj` with bias=6.9) need to keep their
+            # layer-level special init instead of being reset to N(0,0.02) / 0.
+            if not getattr(module.weight, '_is_hf_initialized', False):
+                nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+            if module.bias is not None and not getattr(module.bias, '_is_hf_initialized', False):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)

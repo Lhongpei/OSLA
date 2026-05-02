@@ -1,0 +1,168 @@
+# -*- coding: utf-8 -*-
+# Chunk-mode OSGM with per-head learnable decay on preconditioner D.
+# Based on chunk_osgm.py but uses decay kernels for phase1.
+
+from typing import Optional
+
+import torch
+
+from fla.modules.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu, chunk_gated_delta_rule_fwd_h
+from fla.ops.common.chunk_o import chunk_bwd_dv_local, chunk_bwd_dqkwg, chunk_fwd_o
+from fla.ops.os_delta_rule.wy_fast_os import prepare_wy_repr_bwd, prepare_wy_repr_fwd, recompute_w_u_fwd
+from fla.ops.os_delta_rule.chunk_osgm_phase import fused_osgm_bwd_mapping
+from fla.ops.os_delta_rule.chunk_osgm_phase_decay import (
+    compute_osgm_decay_phase1_fwd,
+    compute_osgm_decay_phase1_bwd,
+)
+from fla.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+
+
+def chunk_delta_rule_fwd(
+    q, k, v, d, beta, scale, initial_state, output_final_state, cu_seqlens=None,
+):
+    kw = k * d
+    w, u, A = prepare_wy_repr_fwd(k=k, v=v, beta=beta, d=d, cu_seqlens=cu_seqlens)
+    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+        k=kw, w=w, u=u, g=None, initial_state=initial_state,
+        output_final_state=output_final_state, cu_seqlens=cu_seqlens
+    )
+    o = chunk_fwd_o(q=q, k=kw, v=v_new, h=h, g=None, scale=scale, cu_seqlens=cu_seqlens)
+    return o, A, final_state
+
+
+def chunk_delta_rule_bwd(
+    q, k, v, d, beta, A, scale, initial_state, do, dht, cu_seqlens=None,
+):
+    kw = k * d
+    w, u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, cu_seqlens=cu_seqlens)
+    h, v_new, _ = chunk_gated_delta_rule_fwd_h(
+        k=kw, w=w, u=u, g=None, initial_state=initial_state,
+        output_final_state=False, cu_seqlens=cu_seqlens,
+    )
+    dv = chunk_bwd_dv_local(q=q, k=kw, do=do, g=None, scale=scale, cu_seqlens=cu_seqlens)
+    dh, dh0, dv = chunk_gated_delta_rule_bwd_dhu(
+        q=q, k=kw, w=w, g=None, h0=initial_state, dht=dht, do=do, dv=dv,
+        scale=scale, cu_seqlens=cu_seqlens
+    )
+    dq, dkw, dw, _ = chunk_bwd_dqkwg(
+        q=q, k=kw, v=v_new, h=h, w=w, dv=dv, do=do, dh=dh, g=None,
+        scale=scale, cu_seqlens=cu_seqlens
+    )
+    dk_read, dv, db, dkw_from_A = prepare_wy_repr_bwd(
+        k=k, v=v, beta=beta, A=A, d=d, dw=dw, du=dv, cu_seqlens=cu_seqlens
+    )
+    dk, dd = fused_osgm_bwd_mapping(dkw, dkw_from_A, k, d, dk_read)
+    return dq, dk, dv, db, dh0, dd
+
+
+class ChunkDeltaRuleDecayFunction(torch.autograd.Function):
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(
+        ctx, q, k, v, beta, gamma_log, scale, eta, initial_h, initial_d,
+        output_final_state, use_qk_l2norm_in_kernel, cu_seqlens,
+        use_denominator, d_min, d_max,
+    ):
+        if use_qk_l2norm_in_kernel:
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
+        else:
+            q_rstd, k_rstd = None, None
+
+        d, final_d = compute_osgm_decay_phase1_fwd(
+            k, gamma_log, eta, use_denominator, d_min, d_max,
+            cu_seqlens, initial_d, output_final_state
+        )
+
+        o, A, final_h = chunk_delta_rule_fwd(
+            q=q, k=k, v=v, d=d, beta=beta, scale=scale,
+            initial_state=initial_h,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+        )
+
+        ctx.save_for_backward(q, q_rstd, k, k_rstd, v, d, beta, A, gamma_log, initial_h)
+
+        ctx.scale = scale
+        ctx.eta = eta
+        ctx.cu_seqlens = cu_seqlens
+        ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+        ctx.use_denominator = use_denominator
+        ctx.d_min = d_min
+        ctx.d_max = d_max
+        ctx.has_initial_d = (initial_d is not None)
+
+        return o.to(q.dtype), final_h, final_d
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    def backward(ctx, do, dh_final, dd_final):
+        q, q_rstd, k, k_rstd, v, d, beta, A, gamma_log, initial_h = ctx.saved_tensors
+
+        dq, dk_phase2, dv, db, dh0, dd = chunk_delta_rule_bwd(
+            q=q, k=k, v=v, d=d, beta=beta, A=A, scale=ctx.scale,
+            initial_state=initial_h, do=do, dht=dh_final, cu_seqlens=ctx.cu_seqlens
+        )
+
+        dk_phase1, dd0, dgamma = compute_osgm_decay_phase1_bwd(
+            k, gamma_log, d, dd, ctx.eta, ctx.use_denominator,
+            ctx.d_min, ctx.d_max, ctx.cu_seqlens,
+            dd_final=dd_final,
+            output_initial_state_gradient=ctx.has_initial_d
+        )
+
+        dk = dk_phase2 + dk_phase1
+
+        if ctx.use_qk_l2norm_in_kernel:
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
+
+        return (
+            dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), db.to(beta.dtype),
+            dgamma,  # gradient for gamma_log
+            None, None, dh0, dd0, None, None, None, None, None, None
+        )
+
+
+@torch.compiler.disable
+def chunk_delta_rule_osgm_decay(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, beta: torch.Tensor,
+    gamma_log: torch.Tensor,
+    scale: float = None, eta: float = None,
+    initial_state=None, output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: Optional[torch.LongTensor] = None,
+    use_denominator: bool = None,
+    d_min: float = None, d_max: float = None,
+):
+    if use_qk_l2norm_in_kernel:
+        if eta is None: eta = 1.0
+        if use_denominator is None: use_denominator = False
+        if d_min is None: d_min = 0.0
+        if d_max is None: d_max = 1e9
+    else:
+        if eta is None: eta = 0.1
+        if use_denominator is None: use_denominator = True
+
+    scale = k.shape[-1] ** -0.5 if scale is None else scale
+
+    initial_h, initial_d = None, None
+    if initial_state is not None:
+        if isinstance(initial_state, tuple):
+            initial_h, initial_d = initial_state
+        else:
+            initial_h = initial_state
+
+    o, final_h, final_d = ChunkDeltaRuleDecayFunction.apply(
+        q, k, v, beta, gamma_log, scale, eta, initial_h, initial_d,
+        output_final_state, use_qk_l2norm_in_kernel, cu_seqlens,
+        use_denominator, d_min, d_max,
+    )
+
+    if output_final_state:
+        return o, (final_h, final_d)
+    return o, None

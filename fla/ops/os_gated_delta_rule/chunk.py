@@ -56,6 +56,10 @@ from fla.ops.os_delta_rule.chunk_osgm_phase_dd_decay import (
     compute_osgm_dd_decay_phase1_bwd,
     compute_osgm_dd_decay_phase1_fwd,
 )
+from fla.ops.os_delta_rule.chunk_osgm_phase_dd_decay_gated import (
+    compute_osgm_dd_decay_gated_phase1_bwd,
+    compute_osgm_dd_decay_gated_phase1_fwd,
+)
 from fla.ops.os_delta_rule.chunk_scaled_dot_qkw import chunk_scaled_dot_qkw_fwd
 from fla.ops.utils import chunk_local_cumsum
 from fla.ops.utils.solve_tril import solve_tril
@@ -470,16 +474,25 @@ class ChunkOSGatedDeltaRuleDDDecayFunction(torch.autograd.Function):
         scale, eta, initial_h, initial_d, output_final_state,
         use_qk_l2norm_in_kernel, cu_seqlens,
         use_denominator, d_min, d_max,
+        gate_aware,
     ):
         q_rstd, k_rstd = None, None
         if use_qk_l2norm_in_kernel:
             q, q_rstd = l2norm_fwd(q)
             k, k_rstd = l2norm_fwd(k)
 
-        d, final_d = compute_osgm_dd_decay_phase1_fwd(
-            k, g_decay, eta, use_denominator, d_min, d_max,
-            cu_seqlens, initial_d, output_final_state,
-        )
+        if gate_aware:
+            # Gate-aware phase1: hypergradient weighted by exp(g_gdn) to
+            # account for how long each token's contribution survives in S.
+            d, final_d = compute_osgm_dd_decay_gated_phase1_fwd(
+                k, g_decay, g, eta, use_denominator, d_min, d_max,
+                cu_seqlens, initial_d, output_final_state,
+            )
+        else:
+            d, final_d = compute_osgm_dd_decay_phase1_fwd(
+                k, g_decay, eta, use_denominator, d_min, d_max,
+                cu_seqlens, initial_d, output_final_state,
+            )
 
         o, A, g_cum, final_h = os_gated_delta_rule_fwd(
             q=q, k=k, v=v, g=g, beta=beta, d=d, scale=scale,
@@ -498,6 +511,7 @@ class ChunkOSGatedDeltaRuleDDDecayFunction(torch.autograd.Function):
         ctx.d_min = d_min
         ctx.d_max = d_max
         ctx.has_initial_d = (initial_d is not None)
+        ctx.gate_aware = gate_aware
         return o.to(q.dtype), final_h, final_d
 
     @staticmethod
@@ -513,8 +527,117 @@ class ChunkOSGatedDeltaRuleDDDecayFunction(torch.autograd.Function):
             initial_state=initial_h, do=do, dht=dh_final,
             cu_seqlens=ctx.cu_seqlens,
         )
-        dk_phase1, dd_initial, dg_decay = compute_osgm_dd_decay_phase1_bwd(
-            k, g_decay, d, dd_from_state, ctx.eta, ctx.use_denominator,
+        if ctx.gate_aware:
+            dk_phase1, dd_initial, dg_decay, dg_gdn_phase1 = compute_osgm_dd_decay_gated_phase1_bwd(
+                k, g_decay, g_raw, d, dd_from_state, ctx.eta, ctx.use_denominator,
+                ctx.d_min, ctx.d_max, ctx.cu_seqlens,
+                dd_final=dd_final,
+                output_initial_state_gradient=ctx.has_initial_d,
+            )
+            # Phase1's gate-aware path contributes an additional gradient into `g`
+            # (the GDN state-forget gate). Accumulate onto the state-path dg.
+            if dg is None:
+                dg = dg_gdn_phase1
+            else:
+                dg = dg + dg_gdn_phase1.to(dg.dtype)
+        else:
+            dk_phase1, dd_initial, dg_decay = compute_osgm_dd_decay_phase1_bwd(
+                k, g_decay, d, dd_from_state, ctx.eta, ctx.use_denominator,
+                ctx.d_min, ctx.d_max, ctx.cu_seqlens,
+                dd_final=dd_final,
+                output_initial_state_gradient=ctx.has_initial_d,
+            )
+        dk = dk_state + dk_phase1
+
+        if ctx.use_qk_l2norm_in_kernel:
+            dq = l2norm_bwd(q, q_rstd, dq)
+            dk = l2norm_bwd(k, k_rstd, dk)
+
+        return (
+            dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype),
+            dg.to(q.dtype) if dg is not None else None, db.to(beta.dtype),
+            dg_decay.to(g_decay.dtype) if dg_decay is not None else None,
+            None, None, dh0, dd_initial,
+            None, None, None, None, None, None,
+            None,  # gate_aware
+        )
+
+
+class ChunkOSGatedDeltaRulePostGateFunction(torch.autograd.Function):
+    """OSGM with post-gate residual on phase1 hypergradient.
+
+    Reuses the gate-aware phase1 kernel but feeds it `g_residual` (typically
+    the chunk-local cumulative sum of g_gdn) instead of per-token g_gdn,
+    so that d's hypergradient is weighted by how much each k actually
+    persists in the chunk-local state.
+
+    `g_residual` is a SEPARATE input from `g` so backward can return distinct
+    gradients into the two sources (state path uses `g`; phase1 uses
+    `g_residual` which the layer typically derives from `g` via a pure-torch
+    chunk_local_cumsum — autograd handles the cumsum bwd).
+    """
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_fwd
+    def forward(
+        ctx,
+        q, k, v, g, beta, g_decay, g_residual,
+        scale, eta, initial_h, initial_d, output_final_state,
+        use_qk_l2norm_in_kernel, cu_seqlens,
+        use_denominator, d_min, d_max,
+    ):
+        q_rstd, k_rstd = None, None
+        if use_qk_l2norm_in_kernel:
+            q, q_rstd = l2norm_fwd(q)
+            k, k_rstd = l2norm_fwd(k)
+
+        # Reuse the gate-aware kernel: g_residual fills the role of g_gdn,
+        # math is identical (k_sq_eff = k² · exp(g_residual)).
+        d, final_d = compute_osgm_dd_decay_gated_phase1_fwd(
+            k, g_decay, g_residual, eta, use_denominator, d_min, d_max,
+            cu_seqlens, initial_d, output_final_state,
+        )
+
+        o, A, g_cum, final_h = os_gated_delta_rule_fwd(
+            q=q, k=k, v=v, g=g, beta=beta, d=d, scale=scale,
+            initial_state=initial_h, output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+        )
+
+        ctx.save_for_backward(
+            q, q_rstd, k, k_rstd, v, g, g_cum, d, beta, A,
+            g_decay, g_residual, initial_h,
+        )
+        ctx.scale = scale
+        ctx.eta = eta
+        ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+        ctx.cu_seqlens = cu_seqlens
+        ctx.use_denominator = use_denominator
+        ctx.d_min = d_min
+        ctx.d_max = d_max
+        ctx.has_initial_d = (initial_d is not None)
+        return o.to(q.dtype), final_h, final_d
+
+    @staticmethod
+    @input_guard
+    @autocast_custom_bwd
+    def backward(ctx, do, dh_final, dd_final):
+        (q, q_rstd, k, k_rstd, v, g_raw, g_cum, d, beta, A,
+         g_decay, g_residual, initial_h) = ctx.saved_tensors
+
+        dq, dk_state, dv, db, dg, dh0, dd_from_state = os_gated_delta_rule_bwd(
+            q=q, k=k, v=v, g_raw=g_raw, beta=beta, d=d, A=A, g_cum=g_cum,
+            scale=ctx.scale,
+            initial_state=initial_h, do=do, dht=dh_final,
+            cu_seqlens=ctx.cu_seqlens,
+        )
+        # Phase1 bwd via gate-aware kernel: returns dg w.r.t. g_residual
+        # (the third kernel arg). It does NOT touch the state path's `g`,
+        # so dg_residual lands at its own input slot — autograd then
+        # propagates through the cumsum at the layer to the raw g.
+        dk_phase1, dd_initial, dg_decay, dg_residual = compute_osgm_dd_decay_gated_phase1_bwd(
+            k, g_decay, g_residual, d, dd_from_state, ctx.eta, ctx.use_denominator,
             ctx.d_min, ctx.d_max, ctx.cu_seqlens,
             dd_final=dd_final,
             output_initial_state_gradient=ctx.has_initial_d,
@@ -529,6 +652,7 @@ class ChunkOSGatedDeltaRuleDDDecayFunction(torch.autograd.Function):
             dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype),
             dg.to(q.dtype) if dg is not None else None, db.to(beta.dtype),
             dg_decay.to(g_decay.dtype) if dg_decay is not None else None,
+            dg_residual.to(g_residual.dtype) if dg_residual is not None else None,
             None, None, dh0, dd_initial,
             None, None, None, None, None, None,
         )
@@ -554,6 +678,9 @@ def chunk_os_gated_delta_rule(
     decay_mode: str = "none",
     gamma_log: Optional[torch.Tensor] = None,      # for "learnable" / "constant"
     g_decay: Optional[torch.Tensor] = None,        # for "data_dependent"
+    gate_aware_hypergradient: bool = False,        # only for "data_dependent" on gated models
+    g_phase1_residual: Optional[torch.Tensor] = None,  # post-gate variant: separate
+                                                       # k² weighting signal (e.g. g_cum)
     **kwargs,
 ):
     """OSGM + GatedDeltaNet chunk-mode entrypoint.
@@ -633,12 +760,27 @@ def chunk_os_gated_delta_rule(
     else:  # data_dependent
         if g_decay is None:
             raise ValueError("decay_mode='data_dependent' requires `g_decay` (shape [B, T, H])")
-        o, final_h, final_d = ChunkOSGatedDeltaRuleDDDecayFunction.apply(
-            q, k, v, g, beta, g_decay,
-            scale, eta, initial_h, initial_d, output_final_state,
-            use_qk_l2norm_in_kernel, cu_seqlens,
-            use_denominator, d_min, d_max,
-        )
+        if g_phase1_residual is not None:
+            if gate_aware_hypergradient:
+                raise ValueError(
+                    "g_phase1_residual is mutually exclusive with gate_aware_hypergradient. "
+                    "post-gate residual already incorporates a gate-aware reweighting via the "
+                    "(typically cumulative) signal you pass; gate_aware on top would double-count."
+                )
+            o, final_h, final_d = ChunkOSGatedDeltaRulePostGateFunction.apply(
+                q, k, v, g, beta, g_decay, g_phase1_residual,
+                scale, eta, initial_h, initial_d, output_final_state,
+                use_qk_l2norm_in_kernel, cu_seqlens,
+                use_denominator, d_min, d_max,
+            )
+        else:
+            o, final_h, final_d = ChunkOSGatedDeltaRuleDDDecayFunction.apply(
+                q, k, v, g, beta, g_decay,
+                scale, eta, initial_h, initial_d, output_final_state,
+                use_qk_l2norm_in_kernel, cu_seqlens,
+                use_denominator, d_min, d_max,
+                gate_aware_hypergradient,
+            )
 
     if output_final_state:
         return o, (final_h, final_d)

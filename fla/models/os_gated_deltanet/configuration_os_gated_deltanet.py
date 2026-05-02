@@ -55,6 +55,34 @@ class OSGDNConfig(PretrainedConfig):
         osgm_d_max: float | None = None,
         osgm_decay_mode: str = "none",
         osgm_decay_gamma: float = 0.999,
+        osgm_freeze: bool = False,
+        gate_aware_hypergradient: bool = False,
+        osgm_d_decay_source: str = "osgm",  # "osgm" (osgm_a_proj) | "gdn" (state gate)
+        osgm_post_gate_residual: bool = False,  # variant A: weight phase1's k² by
+                                                # exp(chunk_local_cumsum(g_gdn)) so d's
+                                                # hypergradient is computed against the
+                                                # post-gate-attenuated k. Tests H1 from
+                                                # OS_GDN_REPORT §3.4.
+        osgm_post_gate_clamp_min: float | None = None,  # if set, clamp g_phase1_residual
+                                                        # from below to bound exp(g_cum)
+                                                        # away from underflow and tame
+                                                        # the cumsum-bwd amplification
+                                                        # that NaN'd the first run.
+        osgm_post_gate_use_remaining: bool = False,  # if True, use exp(g_cum_BT - g_cum_t)
+                                                     # ("remaining decay within chunk")
+                                                     # instead of exp(g_cum_t) ("decay so far").
+                                                     # Late-in-chunk tokens get weight 1;
+                                                     # bounded magnitude across chunk.
+        osgm_post_gate_regret: bool = False,         # OS_GDN_REPORT §3.4: replace OSGM's
+                                                     # surrogate loss with f(S_t)−f(α·S_{t−1}).
+                                                     # Hypergradient becomes
+                                                     # ⟨ẽ,e'⟩/‖e'‖² − ⟨d,k²⟩, removing
+                                                     # state-gate contamination of the
+                                                     # original regret. Mutually exclusive
+                                                     # with osgm_post_gate_residual and
+                                                     # gate_aware_hypergradient.
+        osgm_post_gate_regret_chunk_size: int = 64,  # checkpoint chunk size for the
+                                                     # post-gate-regret recurrence.
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -92,6 +120,14 @@ class OSGDNConfig(PretrainedConfig):
         self.osgm_d_max = osgm_d_max
         self.osgm_decay_mode = osgm_decay_mode
         self.osgm_decay_gamma = osgm_decay_gamma
+        self.osgm_freeze = osgm_freeze
+        self.gate_aware_hypergradient = gate_aware_hypergradient
+        self.osgm_d_decay_source = osgm_d_decay_source
+        self.osgm_post_gate_residual = osgm_post_gate_residual
+        self.osgm_post_gate_clamp_min = osgm_post_gate_clamp_min
+        self.osgm_post_gate_use_remaining = osgm_post_gate_use_remaining
+        self.osgm_post_gate_regret = osgm_post_gate_regret
+        self.osgm_post_gate_regret_chunk_size = osgm_post_gate_regret_chunk_size
 
         if fuse_cross_entropy and fuse_linear_cross_entropy:
             raise ValueError(

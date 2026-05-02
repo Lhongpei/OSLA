@@ -21,6 +21,7 @@ from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate
 from fla.ops.os_gated_delta_rule import chunk_os_gated_delta_rule
+from fla.ops.os_gated_delta_rule.post_gate_regret import post_gate_regret_recurrence
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -109,6 +110,45 @@ class GatedDeltaNet(nn.Module):
         osgm_d_max: float | None = None,
         osgm_decay_mode: str = "none",      # "none"|"learnable"|"constant"|"data_dependent"
         osgm_decay_gamma: float = 0.999,    # only used when decay_mode="constant"
+        osgm_freeze: bool = False,          # if True, make initial_scale a buffer
+                                            # and freeze osgm_a_proj (no gradient flow
+                                            # into OSGM params). Ablation knob for
+                                            # isolating learning-dynamics vs structural
+                                            # causes of OSGM × gated pathologies.
+        gate_aware_hypergradient: bool = False,  # dd_decay only: weight OSGM's k²
+                                                 # by exp(g_gdn) so d's hypergradient
+                                                 # accounts for GDN state-decay timescale.
+        osgm_d_decay_source: str = "osgm",       # dd_decay only: where d's per-token
+                                                 # decay comes from. "osgm" = osgm_a_proj
+                                                 # (default; independent of state gate).
+                                                 # "gdn"  = the GDN state-forget gate g
+                                                 # itself, so d co-decays with the state.
+        osgm_post_gate_residual: bool = False,   # variant A: weight phase1 k² by
+                                                 # exp(chunk_local_cumsum(g_gdn)) — d's
+                                                 # hypergradient sees post-gate-attenuated
+                                                 # k. Mutually exclusive with
+                                                 # gate_aware_hypergradient.
+        osgm_post_gate_clamp_min: float | None = None,  # variant A stability knob:
+                                                        # clamp g_phase1_residual from
+                                                        # below. Bounds exp(g_cum) ≥
+                                                        # exp(clamp_min), preventing
+                                                        # underflow-driven gnorm spikes.
+        osgm_post_gate_use_remaining: bool = False,  # variant A form switch: use
+                                                     # exp(g_cum_BT - g_cum_t) ("remaining
+                                                     # life within chunk") instead of
+                                                     # exp(g_cum_t) ("decay so far").
+                                                     # Bounded magnitude across chunk.
+        osgm_post_gate_regret: bool = False,         # use the §3.4 post-gate regret
+                                                     # hypergradient: grad_d =
+                                                     # ⟨ẽ, e'⟩/‖e'‖² − ⟨d, k²⟩.
+                                                     # Reduces to (1 − ⟨d,k²⟩) at α=1.
+                                                     # Currently routes through a
+                                                     # pure-pytorch chunked recurrence
+                                                     # with activation checkpointing
+                                                     # (slower than the chunk kernel
+                                                     # but correct under autograd).
+        osgm_post_gate_regret_chunk_size: int = 64,  # checkpoint chunk size for the
+                                                     # post-gate-regret recurrence.
         **kwargs,
     ) -> GatedDeltaNet:
         super().__init__()
@@ -131,6 +171,55 @@ class GatedDeltaNet(nn.Module):
         self.osgm_d_max = osgm_d_max
         self.osgm_decay_mode = osgm_decay_mode
         self.osgm_decay_gamma = osgm_decay_gamma
+        self.osgm_freeze = osgm_freeze
+        self.gate_aware_hypergradient = gate_aware_hypergradient
+        if osgm_d_decay_source not in ("osgm", "gdn"):
+            raise ValueError(
+                f"osgm_d_decay_source must be 'osgm' or 'gdn', got {osgm_d_decay_source!r}."
+            )
+        self.osgm_d_decay_source = osgm_d_decay_source
+        if osgm_post_gate_residual:
+            if osgm_decay_mode != "data_dependent":
+                raise ValueError(
+                    "osgm_post_gate_residual=True requires osgm_decay_mode='data_dependent' "
+                    f"(got {osgm_decay_mode!r}); the post-gate residual signal is only "
+                    "meaningful in the data-dependent phase1 path."
+                )
+            if gate_aware_hypergradient:
+                raise ValueError(
+                    "osgm_post_gate_residual is mutually exclusive with "
+                    "gate_aware_hypergradient. The post-gate variant already reweights "
+                    "k² in phase1; gate_aware on top would double-count."
+                )
+            if osgm_d_decay_source != "osgm":
+                raise ValueError(
+                    "osgm_post_gate_residual currently only supports "
+                    "osgm_d_decay_source='osgm' (variant A is orthogonal to variant B)."
+                )
+        self.osgm_post_gate_residual = osgm_post_gate_residual
+        if (osgm_post_gate_clamp_min is not None or osgm_post_gate_use_remaining) \
+                and not osgm_post_gate_residual:
+            raise ValueError(
+                "osgm_post_gate_clamp_min and osgm_post_gate_use_remaining only apply "
+                "when osgm_post_gate_residual=True."
+            )
+        self.osgm_post_gate_clamp_min = osgm_post_gate_clamp_min
+        self.osgm_post_gate_use_remaining = osgm_post_gate_use_remaining
+        # Post-gate regret variant: structurally distinct from the residual variants
+        # above. Mutually exclusive with all other osgm_*_hypergradient/residual flags.
+        if osgm_post_gate_regret:
+            if osgm_post_gate_residual or gate_aware_hypergradient:
+                raise ValueError(
+                    "osgm_post_gate_regret is mutually exclusive with "
+                    "osgm_post_gate_residual and gate_aware_hypergradient."
+                )
+            if osgm_decay_mode not in ("none", "learnable", "constant", "data_dependent"):
+                raise ValueError(
+                    f"osgm_post_gate_regret unsupported with osgm_decay_mode="
+                    f"{osgm_decay_mode!r}."
+                )
+        self.osgm_post_gate_regret = osgm_post_gate_regret
+        self.osgm_post_gate_regret_chunk_size = osgm_post_gate_regret_chunk_size
 
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -219,9 +308,25 @@ class GatedDeltaNet(nn.Module):
 
         if self.use_osgm:
             # OSGM initial preconditioner d_0, learnable per-head.
-            self.initial_scale = nn.Parameter(
-                torch.zeros(self.num_v_heads, self.head_k_dim)
-            )
+            # Initialized to 1.0 (not 0.0) because the OSGM chunk kernel uses
+            # `kw = k * d` everywhere in the state/output path. With d_0=0 and
+            # the GatedDeltaNet state-forget gate simultaneously compressing
+            # h_t, the recurrent state is starved for thousands of steps and
+            # training loss stalls ~1 nat above the gated_deltanet baseline.
+            # Starting at d_0=1 makes the initial forward reduce to vanilla
+            # GatedDeltaNet; OSGM then learns a *relative* preconditioner.
+            if self.osgm_freeze:
+                # Ablation: freeze d_0 to ones (no gradient). `d` still evolves
+                # per-token through phase1 (grad·k² accumulation) but can't
+                # adapt via backprop.
+                self.register_buffer(
+                    'initial_scale',
+                    torch.ones(self.num_v_heads, self.head_k_dim),
+                )
+            else:
+                self.initial_scale = nn.Parameter(
+                    torch.ones(self.num_v_heads, self.head_k_dim)
+                )
             # Decay-mode-specific parameters (mirror delta_net.py conventions).
             if self.osgm_decay_mode == "learnable":
                 # γ = sigmoid(gamma_log); init to ~0.999 (logit(0.999) ≈ 6.9).
@@ -237,13 +342,41 @@ class GatedDeltaNet(nn.Module):
                     torch.full((self.num_v_heads,), gamma_log_val),
                 )
             elif self.osgm_decay_mode == "data_dependent":
-                # Data-dependent γ_t = σ(osgm_a_proj(h)): separate from GDN's a_proj.
-                self.osgm_a_proj = nn.Linear(
-                    hidden_size, self.num_v_heads, bias=True
-                )
-                # Init so initial γ ≈ 0.999 (logsigmoid(6.9) ≈ -0.001).
-                nn.init.zeros_(self.osgm_a_proj.weight)
-                nn.init.constant_(self.osgm_a_proj.bias, 6.9)
+                if self.osgm_d_decay_source == "osgm":
+                    # Data-dependent γ_t = σ(osgm_a_proj(h)): separate from GDN's a_proj.
+                    self.osgm_a_proj = nn.Linear(
+                        hidden_size, self.num_v_heads, bias=True
+                    )
+                    # Init so initial γ ≈ 0.999 (logsigmoid(6.9) ≈ -0.001).
+                    nn.init.zeros_(self.osgm_a_proj.weight)
+                    nn.init.constant_(self.osgm_a_proj.bias, 6.9)
+                    # Mark as already-initialized so HuggingFace's `_init_weights`
+                    # skips this Linear and does NOT clobber the bias back to 0.
+                    # Without this flag, the generic nn.Linear branch in the model's
+                    # _init_weights overwrites bias→0 and weight→N(0,0.02), which
+                    # makes σ(g_decay) = 0.5 (instead of 0.999) — d decays by HALF
+                    # every token, destroying OSGM preconditioner memory.
+                    self.osgm_a_proj.weight._is_hf_initialized = True
+                    self.osgm_a_proj.bias._is_hf_initialized = True
+                    if self.osgm_freeze:
+                        # Ablation: freeze osgm_a_proj → g_decay is a CONSTANT
+                        # ~logsigmoid(6.9) per token (no input dependence, no learning).
+                        self.osgm_a_proj.weight.requires_grad_(False)
+                        self.osgm_a_proj.bias.requires_grad_(False)
+                else:
+                    # source == "gdn": d co-decays with the state. g_decay is aliased
+                    # to the GDN state gate `g` in forward(); no extra projection.
+                    if self.osgm_freeze:
+                        raise ValueError(
+                            "osgm_freeze=True is incompatible with osgm_d_decay_source='gdn' "
+                            "(no osgm_a_proj exists to freeze)."
+                        )
+                    if gate_aware_hypergradient:
+                        raise ValueError(
+                            "gate_aware_hypergradient=True is incompatible with "
+                            "osgm_d_decay_source='gdn'. Variant B replaces d's decay; "
+                            "gate_aware reweights k². Pick one."
+                        )
             elif self.osgm_decay_mode not in ("none",):
                 raise ValueError(
                     f"unknown osgm_decay_mode={self.osgm_decay_mode!r}. "
@@ -268,7 +401,11 @@ class GatedDeltaNet(nn.Module):
 
         batch_size, q_len, _ = hidden_states.shape
         # change to inference mode.
-        mode = 'fused_recurrent' if (q_len <= 64 and not self.training) else self.mode
+        # OS-GDN does not have a fused_recurrent kernel yet, so always use chunk.
+        if self.use_osgm:
+            mode = self.mode
+        else:
+            mode = 'fused_recurrent' if (q_len <= 64 and not self.training) else self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
@@ -339,25 +476,82 @@ class GatedDeltaNet(nn.Module):
             if self.osgm_decay_mode in ("learnable", "constant"):
                 gamma_log = self.osgm_gamma_log
             elif self.osgm_decay_mode == "data_dependent":
-                g_decay = F.logsigmoid(self.osgm_a_proj(hidden_states))  # [B,T,H]
-            o, recurrent_state = chunk_os_gated_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                beta=beta,
-                initial_state=(initial_h, initial_d),
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
-                eta=self.osgm_eta,
-                use_denominator=self.osgm_use_denominator,
-                d_min=self.osgm_d_min,
-                d_max=self.osgm_d_max,
-                decay_mode=self.osgm_decay_mode,
-                gamma_log=gamma_log,
-                g_decay=g_decay,
-            )
+                if self.osgm_d_decay_source == "gdn":
+                    # Variant B: tie d's per-token decay to the GDN state-forget gate.
+                    # `g` is the raw log-decay [B,T,H] from fused_gdn_gate above; phase1
+                    # consumes it as exp(g_t) per step, identical math to the osgm_a_proj
+                    # path but with d's time-scale = state's time-scale.
+                    g_decay = g
+                else:
+                    g_decay = F.logsigmoid(self.osgm_a_proj(hidden_states))  # [B,T,H]
+            # Variant A: post-gate residual. Pass chunk-local cumsum of g as a separate
+            # k² weighting signal. Computed in pure torch under autograd so the cumsum
+            # bwd is handled automatically (gradient lands back on the same a_proj that
+            # drives the state path, additively with the state-side dg).
+            g_phase1_residual = None
+            if self.osgm_post_gate_residual:
+                B_, T_, H_ = g.shape
+                CS = 64  # must match _CHUNK_SIZE in fla.ops.os_gated_delta_rule.chunk
+                if T_ % CS != 0:
+                    raise ValueError(
+                        f"post_gate_residual requires T ({T_}) divisible by chunk size {CS}."
+                    )
+                g_chunked = g.float().view(B_, T_ // CS, CS, H_)
+                g_cum = g_chunked.cumsum(dim=2)  # [B, n_chunks, CS, H]
+                if self.osgm_post_gate_use_remaining:
+                    # "Remaining decay within chunk": for token at position t,
+                    # weight by exp(g_cum_BT - g_cum_t) = exp(sum of g's from
+                    # t+1 to chunk_end), the future life within this chunk.
+                    # Bounded in (0, 1]; chunk-end token gets weight 1, chunk-
+                    # start token gets the smallest weight.
+                    g_cum_BT = g_cum[:, :, -1:, :]  # [B, n_chunks, 1, H]
+                    g_cum = g_cum_BT - g_cum
+                g_phase1_residual = g_cum.view(B_, T_, H_)
+                if self.osgm_post_gate_clamp_min is not None:
+                    # Bound exp(g_phase1_residual) ≥ exp(clamp_min) to prevent
+                    # underflow-driven instability through the cumsum bwd.
+                    g_phase1_residual = g_phase1_residual.clamp(min=self.osgm_post_gate_clamp_min)
+            if self.osgm_post_gate_regret:
+                # §3.4 path. l2-normalize q,k externally (the chunk kernel does this
+                # internally via use_qk_l2norm_in_kernel; the pure-pytorch path can't
+                # so we do it here under autograd).
+                q_n = F.normalize(q, p=2, dim=-1, eps=1e-6)
+                k_n = F.normalize(k, p=2, dim=-1, eps=1e-6)
+                eta = self.osgm_eta if self.osgm_eta is not None else 1.0
+                o, recurrent_state = post_gate_regret_recurrence(
+                    q=q_n, k=k_n, v=v, g=g, beta=beta,
+                    eta=eta,
+                    initial_state=(initial_h, initial_d),
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                    decay_mode=self.osgm_decay_mode,
+                    gamma_log=gamma_log,
+                    g_decay=g_decay,
+                    chunk_size=self.osgm_post_gate_regret_chunk_size,
+                )
+            else:
+                o, recurrent_state = chunk_os_gated_delta_rule(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g,
+                    beta=beta,
+                    initial_state=(initial_h, initial_d),
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=True,
+                    eta=self.osgm_eta,
+                    use_denominator=self.osgm_use_denominator,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                    decay_mode=self.osgm_decay_mode,
+                    gamma_log=gamma_log,
+                    g_decay=g_decay,
+                    gate_aware_hypergradient=self.gate_aware_hypergradient,
+                    g_phase1_residual=g_phase1_residual,
+                )
         elif mode == 'chunk':
             o, recurrent_state = chunk_gated_delta_rule(
                 q=q,

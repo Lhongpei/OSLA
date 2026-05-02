@@ -177,3 +177,119 @@ def naive_recurrent_os_gated_delta_rule(
     final_state = S if output_final_state else None
     final_d = d_curr if output_final_d else None
     return o.to(v.dtype), final_state, final_d
+
+
+def naive_recurrent_os_gated_delta_rule_post_gate_regret(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g_log: torch.Tensor,
+    beta: torch.Tensor,
+    scale: float | None = None,
+    eta: float = 1.0,
+    d_min: float | None = None,
+    d_max: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    initial_d: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    output_final_d: bool = False,
+    decay_mode: str = "none",
+    gamma_log: torch.Tensor | None = None,
+    g_decay: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    """OSGM + GDN with the *post-gate regret* hypergradient (OS_GDN_REPORT §3.4).
+
+    Same forward state recurrence as `naive_recurrent_os_gated_delta_rule`,
+    but `d` is updated using the regret of `f(S_t) − f(α·S_{t−1})` instead
+    of `f(S_t) − f(S_{t−1})`. Concretely:
+
+        e' = v − k^T·S_{t-1}                  (pre-gate residual)
+        ẽ  = v − α·k^T·S_{t-1} = (1−α)·v + α·e'  (post-gate residual)
+        grad_d = ⟨ẽ, e'⟩ / (‖e'‖² + eps) − ⟨d, k²⟩
+
+    Reduces to `1 − ⟨d, k²⟩` (the un-gated `dd_decay` formula) when α≡1,
+    so non-gated configs train identically to plain OSDN.
+
+    The forward convention matches the chunk kernel:
+        - residual / projection uses raw `k` (NOT `kw = k·d`),
+        - state absorption uses `kw`,
+        - the GDN gate `α = exp(g_log)` is applied to S BEFORE the rank-1
+          delta write.
+
+    Args / shapes: same as `naive_recurrent_os_gated_delta_rule`.
+    """
+    B, T, H, K = q.shape
+    V = v.shape[-1]
+    if scale is None:
+        scale = K ** -0.5
+
+    q_f, k_f, v_f, g_f, b_f = (x.float() for x in (q, k, v, g_log, beta))
+
+    S = k_f.new_zeros(B, H, K, V)
+    if initial_state is not None:
+        S = S + initial_state.float()
+
+    d_curr = (
+        initial_d.float().clone() if initial_d is not None
+        else k_f.new_zeros(B, H, K)
+    )
+
+    o = v_f.new_zeros(B, T, H, V)
+
+    for t in range(T):
+        q_t = q_f[:, t]      # [B, H, K]
+        k_t = k_f[:, t]
+        v_t = v_f[:, t]      # [B, H, V]
+        g_t = g_f[:, t]      # [B, H]
+        b_t = b_f[:, t]      # [B, H]
+
+        k_sq = k_t * k_t
+        alpha = g_t.exp()                                # [B, H]
+        alpha_v = alpha[..., None]                        # [B, H, 1] for V-bcast
+
+        # Pre-gate residual e' = v - k^T·S_{t-1}, against the *un-gated* state.
+        # k_t shape [B,H,K]; S shape [B,H,K,V] → sum over K-axis (dim -2) gives [B,H,V].
+        proj = (S * k_t[..., None]).sum(-2)               # [B, H, V]
+        e_prime = v_t - proj
+        # Post-gate residual ẽ = v - α·proj  =  (1-α)·v + α·e' (algebraic identity).
+        e_tilde = (1.0 - alpha_v) * v_t + alpha_v * e_prime
+
+        # Post-gate regret hypergradient.
+        e_prime_norm_sq = (e_prime * e_prime).sum(-1, keepdim=True) + 1e-8  # [B,H,1]
+        e_dot = (e_tilde * e_prime).sum(-1, keepdim=True)                    # [B,H,1]
+        inner_d_k = (d_curr * k_sq).sum(-1, keepdim=True)                    # [B,H,1]
+        grad_d = e_dot / e_prime_norm_sq - inner_d_k                         # [B,H,1]
+
+        # OSGM-side decay on d (separate from state gate α).
+        if decay_mode == "none":
+            d_base = d_curr
+        elif decay_mode in ("learnable", "constant"):
+            assert gamma_log is not None
+            gamma = torch.sigmoid(gamma_log.float())[None, :, None]   # [1,H,1]
+            d_base = gamma * d_curr
+        elif decay_mode == "data_dependent":
+            assert g_decay is not None
+            gamma_t = g_decay[:, t].float().exp()[..., None]           # [B,H,1]
+            d_base = gamma_t * d_curr
+        else:
+            raise ValueError(f"unknown decay_mode={decay_mode!r}")
+
+        d_next = d_base + eta * grad_d * k_sq
+        if d_min is not None and d_max is not None:
+            d_next = d_next.clamp(d_min, d_max)
+
+        # State update: S ← α·S + β·kw·e'^T  (kw uses the d *before* the OSGM step,
+        # matching the chunk kernel which absorbs at d_t and steps to d_{t+1} after).
+        S = alpha[..., None, None] * S
+        kw_t = k_t * d_curr
+        S = S + kw_t[..., None] * (b_t[..., None] * e_prime)[..., None, :]
+
+        # Output.
+        q_scaled = q_t * scale
+        o[:, t] = (S * q_scaled[..., None]).sum(-2)
+
+        d_curr = d_next
+
+    final_state = S if output_final_state else None
+    final_d = d_curr if output_final_d else None
+    return o.to(v.dtype), final_state, final_d
