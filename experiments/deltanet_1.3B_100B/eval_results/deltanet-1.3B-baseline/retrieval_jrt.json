@@ -1,0 +1,35 @@
+{
+  "model_path": "/data0/OSLA/experiments/deltanet_1.3B_100B/exp/deltanet-1.3B-baseline",
+  "results": {
+    "based_fda": {
+      "contains": 0.21525885558583105,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_fda_twice": {
+      "contains": 0.06085376930063579,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_swde": {
+      "contains": 0.3711340206185567,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_swde_twice": {
+      "contains": 0.3917525773195876,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_squad": {
+      "contains": 0.41451125293920055,
+      "n_samples": 2977,
+      "n_skipped": 7
+    },
+    "based_squad_twice": {
+      "contains": 0.2630164595230097,
+      "n_samples": 2977,
+      "n_skipped": 7
+    }
+  }
+}
