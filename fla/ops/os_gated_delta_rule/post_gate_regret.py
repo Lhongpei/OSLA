@@ -35,6 +35,7 @@ kernel modeled on ``fla.ops.os_delta_rule.fused_recurrent_osgm.py``).
 """
 from __future__ import annotations
 
+import os
 from typing import Optional, Tuple
 
 import torch
@@ -42,6 +43,13 @@ from torch.utils.checkpoint import checkpoint
 
 
 _DEFAULT_CHUNK = 64
+
+# torch.compile of `_post_gate_chunk_step` removes the per-token kernel-launch
+# overhead that dominates wall-time at production scale (21 layers × T=4096
+# yields ~86k host iterations per fwd; without compile MFU collapses to <0.1%).
+# Disable via OSLA_DISABLE_POST_GATE_COMPILE=1 if a torch/inductor regression
+# breaks compilation on a given host.
+_DISABLE_COMPILE = os.environ.get("OSLA_DISABLE_POST_GATE_COMPILE", "0") == "1"
 
 
 def _post_gate_chunk_step(
@@ -137,6 +145,21 @@ def _post_gate_chunk_step(
     return o_buf, S, d
 
 
+# Compiled variant. dynamo unrolls the inner ``for t in range(C)`` (C is constant
+# at 64), specializes on decay_mode/g_decay_c None-ness, and fuses the small
+# per-token ops into one graph. ``fullgraph=False`` is required because
+# ``decay_mode`` is a Python string with branching; dynamo graph-breaks at the
+# string compare and emits a separate trace per mode. ``dynamic=False`` keeps
+# shapes static so we don't pay re-compilation cost mid-training (B, T, H, K, V
+# are fixed across a run).
+if _DISABLE_COMPILE or not hasattr(torch, "compile"):
+    _compiled_chunk_step = _post_gate_chunk_step
+else:
+    _compiled_chunk_step = torch.compile(
+        _post_gate_chunk_step, fullgraph=False, dynamic=False
+    )
+
+
 def post_gate_regret_recurrence(
     q: torch.Tensor,                   # [B, T, H, K]
     k: torch.Tensor,
@@ -155,6 +178,7 @@ def post_gate_regret_recurrence(
     g_decay: Optional[torch.Tensor] = None,
     chunk_size: int = _DEFAULT_CHUNK,
     use_checkpoint: Optional[bool] = None,
+    use_compile: Optional[bool] = None,
 ):
     """Post-gate-regret OS-GDN forward (autograd-friendly via checkpointing).
 
@@ -206,6 +230,9 @@ def post_gate_regret_recurrence(
 
     if use_checkpoint is None:
         use_checkpoint = q.requires_grad and torch.is_grad_enabled()
+    if use_compile is None:
+        use_compile = q.is_cuda and not _DISABLE_COMPILE
+    chunk_fn = _compiled_chunk_step if use_compile else _post_gate_chunk_step
 
     n_chunks = T // chunk_size
     o_chunks = []
@@ -217,13 +244,13 @@ def post_gate_regret_recurrence(
 
         if use_checkpoint:
             o_c, S, d = checkpoint(
-                _post_gate_chunk_step,
+                chunk_fn,
                 q_c, k_c, v_c, g_c, b_c, g_decay_c, S, d,
                 eta, decay_mode, gamma_log, d_min, d_max, scale,
                 use_reentrant=False,
             )
         else:
-            o_c, S, d = _post_gate_chunk_step(
+            o_c, S, d = chunk_fn(
                 q_c, k_c, v_c, g_c, b_c, g_decay_c, S, d,
                 eta, decay_mode, gamma_log, d_min, d_max, scale,
             )
