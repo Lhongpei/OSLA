@@ -47,3 +47,9 @@ __pycache__
 
 # Draft
 simulate.py
+
+# oh-my-claudecode local plugin state (project memory, sessions)
+.omc/
+
+# Vendored third-party clones (not git submodules)
+prefix-linear-attention/
