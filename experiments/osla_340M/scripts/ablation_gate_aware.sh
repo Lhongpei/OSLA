@@ -1,6 +1,19 @@
 #!/bin/bash
-# DeltaNet 340M Baseline (chunk mode) on 8xH100
-# Re-run to collect loss curves for comparison with OSGM learnable-d0
+# Gate-aware OSGM hypergradient: weight k² by exp(g_gdn) in phase1.
+#
+# Hypothesis: OSGM's surrogate loss `½(1 - ⟨d, k²⟩)²` assumes every token's
+# k contributes permanently to S. GatedDeltaNet violates this — state is
+# decayed by exp(g_gdn) per step, so k's contribution is transient. Weighting
+# k² by exp(g_gdn) aligns the hypergradient's time scale with the state's
+# actual memory time scale.
+#
+# New triton kernel: chunk_osgm_phase_dd_decay_gated.py (validated against
+# pure-torch autograd to ~1e-8 in unit tests; degenerate to dd_decay when
+# g_gdn=0).
+#
+# Expected at step 2048: loss ≈ 3.0 (close to baseline 2.99) if hypothesis
+# holds. All previous configs sit at 4.0-4.5 — this is the last structurally
+# motivated attempt.
 
 set -e
 
@@ -13,31 +26,36 @@ export NCCL_DEBUG=WARN
 export NCCL_NVLS_ENABLE=0
 export NCCL_P2P_LEVEL=NVL
 export NCCL_P2P_DISABLE=0
-export WANDB_PROJECT=osla_340M
-export WANDB_NAME=deltanet-340M-baseline
+export WANDB_MODE=disabled
 
-DUMP=/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-baseline
-CONFIG=/data0/OSLA/flame/configs/delta_net_340M.json
+CONFIG=/data0/OSLA/experiments/osla_340M/configs/os_gated_deltanet_dd_decay_gate_aware_340M.json
+DUMP=/data0/OSLA/experiments/osla_340M/exp/os-gated-deltanet-340M-ablation-gate-aware
 TOKENIZER=fla-hub/delta_net-1.3B-100B
 
-mkdir -p $DUMP/logs
+mkdir -p "$DUMP/logs"
 
 cd /data0/OSLA/flame
+
+echo "=============================================="
+echo "Gate-aware hypergradient smoke test (2048 steps)"
+echo "Dump:    $DUMP"
+echo "Started: $(date)"
+echo "=============================================="
 
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 torchrun --nnodes=1 \
   --nproc_per_node=8 \
   --rdzv_backend c10d \
-  --rdzv_endpoint "localhost:29500" \
+  --rdzv_endpoint "localhost:29550" \
   --local-ranks-filter 0 \
   --role rank \
   --tee 3 \
-  --log-dir $DUMP/logs \
+  --log-dir "$DUMP/logs" \
   -m flame.train \
   --job.config_file flame/models/fla.toml \
-  --job.dump_folder $DUMP \
-  --model.config $CONFIG \
-  --model.tokenizer_path $TOKENIZER \
+  --job.dump_folder "$DUMP" \
+  --model.config "$CONFIG" \
+  --model.tokenizer_path "$TOKENIZER" \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
   --optimizer.lr 1e-3 \
@@ -49,7 +67,7 @@ torchrun --nnodes=1 \
   --training.context_len 4096 \
   --training.varlen \
   --training.gradient_accumulation_steps 1 \
-  --training.steps 20480 \
+  --training.steps 2048 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
   --training.data_parallel_replicate_degree 8 \
@@ -65,4 +83,6 @@ torchrun --nnodes=1 \
   --checkpoint.interval 2048 \
   --checkpoint.load_step -1 \
   --checkpoint.keep_latest_k 2 \
-  --metrics.log_freq 1
+  --metrics.log_freq 64
+
+echo "Done at $(date)"

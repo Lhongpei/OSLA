@@ -1,0 +1,15 @@
+{
+  "model_path": "experiments/osla_340M/exp/deltanet-340M-osla-osgm-chunk-run2",
+  "results": {
+    "based_fda": {
+      "contains": 0.16167120799273388,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_fda_twice": {
+      "contains": 0.04268846503178928,
+      "n_samples": 1101,
+      "n_skipped": 1
+    }
+  }
+}

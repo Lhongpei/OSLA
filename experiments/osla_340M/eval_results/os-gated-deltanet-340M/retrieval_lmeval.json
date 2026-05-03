@@ -1,0 +1,41 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/os-gated-deltanet-340M",
+  "results": {
+    "drop": {
+      "alias": "drop",
+      "em,none": 0.0003145973154362416,
+      "em_stderr,none": 0.00018161379468841917,
+      "f1,none": 0.010155201342281898,
+      "f1_stderr,none": 0.0006050278942240439
+    },
+    "nq_open": {
+      "alias": "nq_open",
+      "exact_match,remove_whitespace": 0.0,
+      "exact_match_stderr,remove_whitespace": 0.0
+    },
+    "triviaqa": {
+      "alias": "triviaqa",
+      "exact_match,remove_whitespace": 0.00022291573785109228,
+      "exact_match_stderr,remove_whitespace": 0.00011144855087435115
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/os-gated-deltanet-340M",
+    "model_args": "None",
+    "model_num_parameters": "379904252",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "32",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

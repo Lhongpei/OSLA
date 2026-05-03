@@ -1,0 +1,122 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-baseline",
+  "results": {
+    "longbench_2wikimqa": {
+      "alias": "longbench_2wikimqa",
+      "score,none": 0.08547397541181187,
+      "score_stderr,none": 0.00839390656135957,
+      "qa_f1_score,none": 0.08547397541181187,
+      "qa_f1_score_stderr,none": 0.00839390656135957
+    },
+    "longbench_gov_report": {
+      "alias": "longbench_gov_report",
+      "score,none": 0.053933635028693666,
+      "score_stderr,none": 0.002095541401490871,
+      "rouge_score,none": 0.053933635028693666,
+      "rouge_score_stderr,none": 0.002095541401490871
+    },
+    "longbench_hotpotqa": {
+      "alias": "longbench_hotpotqa",
+      "score,none": 0.036444178492056625,
+      "score_stderr,none": 0.00563612779114612,
+      "qa_f1_score,none": 0.036444178492056625,
+      "qa_f1_score_stderr,none": 0.00563612779114612
+    },
+    "longbench_multi_news": {
+      "alias": "longbench_multi_news",
+      "score,none": 0.06849069882843098,
+      "score_stderr,none": 0.003457422303472134,
+      "rouge_score,none": 0.06849069882843098,
+      "rouge_score_stderr,none": 0.003457422303472134
+    },
+    "longbench_multifieldqa_en": {
+      "alias": "longbench_multifieldqa_en",
+      "score,none": 0.1113676649831437,
+      "score_stderr,none": 0.009628423381176653,
+      "qa_f1_score,none": 0.1113676649831437,
+      "qa_f1_score_stderr,none": 0.009628423381176653
+    },
+    "longbench_musique": {
+      "alias": "longbench_musique",
+      "score,none": 0.024023442268683897,
+      "score_stderr,none": 0.0037037166044993713,
+      "qa_f1_score,none": 0.024023442268683897,
+      "qa_f1_score_stderr,none": 0.0037037166044993713
+    },
+    "longbench_narrativeqa": {
+      "alias": "longbench_narrativeqa",
+      "score,none": 0.016714710450576136,
+      "score_stderr,none": 0.0018033381254344185,
+      "qa_f1_score,none": 0.016714710450576136,
+      "qa_f1_score_stderr,none": 0.0018033381254344185
+    },
+    "longbench_passage_count": {
+      "alias": "longbench_passage_count",
+      "score,none": 0.0,
+      "score_stderr,none": 0.0,
+      "count_score,none": 0.0,
+      "count_score_stderr,none": 0.0
+    },
+    "longbench_passage_retrieval_en": {
+      "alias": "longbench_passage_retrieval_en",
+      "score,none": 0.025583333333333336,
+      "score_stderr,none": 0.008721189707617191,
+      "retrieval_score,none": 0.025583333333333336,
+      "retrieval_score_stderr,none": 0.008721189707617191
+    },
+    "longbench_qasper": {
+      "alias": "longbench_qasper",
+      "score,none": 0.02987552730150185,
+      "score_stderr,none": 0.0033974747826233816,
+      "qa_f1_score,none": 0.02987552730150185,
+      "qa_f1_score_stderr,none": 0.0033974747826233816
+    },
+    "longbench_qmsum": {
+      "alias": "longbench_qmsum",
+      "score,none": 0.1397390996082575,
+      "score_stderr,none": 0.005615684133133708,
+      "rouge_score,none": 0.1397390996082575,
+      "rouge_score_stderr,none": 0.005615684133133708
+    },
+    "longbench_samsum": {
+      "alias": "longbench_samsum",
+      "score,none": 0.0783733194609209,
+      "score_stderr,none": 0.007683580844654741,
+      "rouge_score,none": 0.0783733194609209,
+      "rouge_score_stderr,none": 0.007683580844654741
+    },
+    "longbench_trec": {
+      "alias": "longbench_trec",
+      "score,none": 0.21,
+      "score_stderr,none": 0.028873315391699354,
+      "classification_score,none": 0.21,
+      "classification_score_stderr,none": 0.028873315391699354
+    },
+    "longbench_triviaqa": {
+      "alias": "longbench_triviaqa",
+      "score,none": 0.12902849733524208,
+      "score_stderr,none": 0.01356308436987157,
+      "qa_f1_score,none": 0.12902849733524208,
+      "qa_f1_score_stderr,none": 0.01356308436987157
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-baseline",
+    "model_args": "None",
+    "model_num_parameters": "374362112",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "16",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

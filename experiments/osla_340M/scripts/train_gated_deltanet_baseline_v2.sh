@@ -1,6 +1,7 @@
 #!/bin/bash
-# DeltaNet 340M Baseline (chunk mode) on 8xH100
-# Re-run to collect loss curves for comparison with OSGM learnable-d0
+# Gated DeltaNet 340M Baseline v2 (chunk mode) on 8xH100
+# Follows GatedDeltaNet guide: num_heads*head_dim = 0.75*hidden_size
+# head_dim=128, num_heads=6, expand_v=2, 21 layers, ~380M params
 
 set -e
 
@@ -14,10 +15,10 @@ export NCCL_NVLS_ENABLE=0
 export NCCL_P2P_LEVEL=NVL
 export NCCL_P2P_DISABLE=0
 export WANDB_PROJECT=osla_340M
-export WANDB_NAME=deltanet-340M-baseline
+export WANDB_NAME=gated-deltanet-340M-baseline-v2
 
-DUMP=/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-baseline
-CONFIG=/data0/OSLA/flame/configs/delta_net_340M.json
+DUMP=/data0/OSLA/experiments/osla_340M/exp/gated-deltanet-340M-baseline-v2
+CONFIG=/data0/OSLA/experiments/osla_340M/configs/gated_deltanet_340M_v2.json
 TOKENIZER=fla-hub/delta_net-1.3B-100B
 
 mkdir -p $DUMP/logs

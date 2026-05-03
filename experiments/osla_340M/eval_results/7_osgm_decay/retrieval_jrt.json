@@ -1,0 +1,35 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-osla-osgm-decay-chunk",
+  "results": {
+    "based_fda": {
+      "contains": 0.05631244323342416,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_fda_twice": {
+      "contains": 0.05086285195277021,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_swde": {
+      "contains": 0.12089971883786317,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_swde_twice": {
+      "contains": 0.17994376757263356,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_squad": {
+      "contains": 0.2643600940544172,
+      "n_samples": 2977,
+      "n_skipped": 7
+    },
+    "based_squad_twice": {
+      "contains": 0.13402754450789386,
+      "n_samples": 2977,
+      "n_skipped": 7
+    }
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/os-gated-deltanet-340M-dd-decay",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.17832764505119453,
+      "acc_stderr,none": 0.01118613940671131,
+      "acc_norm,none": 0.21331058020477817,
+      "acc_norm_stderr,none": 0.011970971742326334
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.39604377104377103,
+      "acc_stderr,none": 0.01003558096209793,
+      "acc_norm,none": 0.37037037037037035,
+      "acc_norm_stderr,none": 0.009908978578665757
+    },
+    "boolq": {
+      "alias": "boolq",
+      "acc,none": 0.6122324159021407,
+      "acc_stderr,none": 0.008521900328013891
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.2725552678749253,
+      "acc_stderr,none": 0.0044436393941774,
+      "acc_norm,none": 0.2751443935471022,
+      "acc_norm_stderr,none": 0.00445674310817071
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 1520.1320919213294,
+      "perplexity_stderr,none": 70.76076219246065,
+      "acc,none": 0.0673394139336309,
+      "acc_stderr,none": 0.003491471899052779
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.5821545157780196,
+      "acc_stderr,none": 0.011507272925335635,
+      "acc_norm,none": 0.5690968443960827,
+      "acc_norm_stderr,none": 0.01155389317590141
+    },
+    "social_iqa": {
+      "alias": "social_iqa",
+      "acc,none": 0.34800409416581374,
+      "acc_stderr,none": 0.010778628144848238
+    },
+    "wikitext": {
+      "alias": "wikitext",
+      "word_perplexity,none": 103.12178450389084,
+      "word_perplexity_stderr,none": "N/A",
+      "byte_perplexity,none": 2.379614423850216,
+      "byte_perplexity_stderr,none": "N/A",
+      "bits_per_byte,none": 1.2507278282123342,
+      "bits_per_byte_stderr,none": "N/A"
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.5082872928176796,
+      "acc_stderr,none": 0.014050555322824189
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/os-gated-deltanet-340M-dd-decay",
+    "model_args": "None",
+    "model_num_parameters": "380033402",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "64",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

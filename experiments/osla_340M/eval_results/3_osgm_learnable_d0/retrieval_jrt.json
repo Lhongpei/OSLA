@@ -1,0 +1,35 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-osla-osgm-chunk-learnable-d0",
+  "results": {
+    "based_fda": {
+      "contains": 0.08991825613079019,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_fda_twice": {
+      "contains": 0.04632152588555858,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_swde": {
+      "contains": 0.15651358950328023,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_swde_twice": {
+      "contains": 0.21649484536082475,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_squad": {
+      "contains": 0.3046691299966409,
+      "n_samples": 2977,
+      "n_skipped": 7
+    },
+    "based_squad_twice": {
+      "contains": 0.2200201545179711,
+      "n_samples": 2977,
+      "n_skipped": 7
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-osla-osgm-decay-chunk",
+  "results": {
+    "drop": {
+      "alias": "drop",
+      "em,none": 0.00041946308724832214,
+      "em_stderr,none": 0.00020969854707829136,
+      "f1,none": 0.02676279362416105,
+      "f1_stderr,none": 0.0008622738026385912
+    },
+    "nq_open": {
+      "alias": "nq_open",
+      "exact_match,remove_whitespace": 0.01301939058171745,
+      "exact_match_stderr,remove_whitespace": 0.0018869317722298286
+    },
+    "triviaqa": {
+      "alias": "triviaqa",
+      "exact_match,remove_whitespace": 0.0021176995095853767,
+      "exact_match_stderr,remove_whitespace": 0.0003431818406545723
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-osla-osgm-decay-chunk",
+    "model_args": "None",
+    "model_num_parameters": "374386880",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "64",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/kda-340M-baseline",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.2687713310580205,
+      "acc_stderr,none": 0.012955065963710698,
+      "acc_norm,none": 0.27474402730375425,
+      "acc_norm_stderr,none": 0.013044617212771227
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.5963804713804713,
+      "acc_stderr,none": 0.010067368960348197,
+      "acc_norm,none": 0.5248316498316499,
+      "acc_norm_stderr,none": 0.010247123122159274
+    },
+    "boolq": {
+      "alias": "boolq",
+      "acc,none": 0.6103975535168196,
+      "acc_stderr,none": 0.008529228894936292
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.345947022505477,
+      "acc_stderr,none": 0.004747038768172527,
+      "acc_norm,none": 0.41635132443736306,
+      "acc_norm_stderr,none": 0.004919457850104239
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 26.950795826122892,
+      "perplexity_stderr,none": 0.9506700730093145,
+      "acc,none": 0.35610324083058414,
+      "acc_stderr,none": 0.006671264434701394
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.6817192600652884,
+      "acc_stderr,none": 0.010868093932082228,
+      "acc_norm,none": 0.6659412404787813,
+      "acc_norm_stderr,none": 0.011004613886336737
+    },
+    "social_iqa": {
+      "alias": "social_iqa",
+      "acc,none": 0.3930399181166837,
+      "acc_stderr,none": 0.011052162799729242
+    },
+    "wikitext": {
+      "alias": "wikitext",
+      "word_perplexity,none": 26.56079511713617,
+      "word_perplexity_stderr,none": "N/A",
+      "byte_perplexity,none": 1.8464612580399014,
+      "byte_perplexity_stderr,none": "N/A",
+      "bits_per_byte,none": 0.8847629926166006,
+      "bits_per_byte_stderr,none": "N/A"
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.5201262825572218,
+      "acc_stderr,none": 0.014041096664344326
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/kda-340M-baseline",
+    "model_args": "None",
+    "model_num_parameters": "373600312",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "16",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-baseline",
+  "results": {
+    "arc_challenge": {
+      "alias": "arc_challenge",
+      "acc,none": 0.2363481228668942,
+      "acc_stderr,none": 0.012414960524301836,
+      "acc_norm,none": 0.2619453924914676,
+      "acc_norm_stderr,none": 0.01284905482685811
+    },
+    "arc_easy": {
+      "alias": "arc_easy",
+      "acc,none": 0.5913299663299664,
+      "acc_stderr,none": 0.01008717449876289,
+      "acc_norm,none": 0.5256734006734006,
+      "acc_norm_stderr,none": 0.010246249665591227
+    },
+    "hellaswag": {
+      "alias": "hellaswag",
+      "acc,none": 0.33260306711810395,
+      "acc_stderr,none": 0.004701828071992648,
+      "acc_norm,none": 0.3919537940649273,
+      "acc_norm_stderr,none": 0.004871887422893566
+    },
+    "lambada_openai": {
+      "alias": "lambada_openai",
+      "perplexity,none": 35.63674586650498,
+      "perplexity_stderr,none": 1.306598065428196,
+      "acc,none": 0.312827479138366,
+      "acc_stderr,none": 0.006459477837059417
+    },
+    "piqa": {
+      "alias": "piqa",
+      "acc,none": 0.6550598476605005,
+      "acc_stderr,none": 0.011090670102993161,
+      "acc_norm,none": 0.6507072905331882,
+      "acc_norm_stderr,none": 0.01112328381752508
+    },
+    "wikitext": {
+      "alias": "wikitext",
+      "word_perplexity,none": 28.724684853236234,
+      "word_perplexity_stderr,none": "N/A",
+      "byte_perplexity,none": 1.8737041789681559,
+      "byte_perplexity_stderr,none": "N/A",
+      "bits_per_byte,none": 0.9058931978082492,
+      "bits_per_byte_stderr,none": "N/A"
+    },
+    "winogrande": {
+      "alias": "winogrande",
+      "acc,none": 0.5153906866614049,
+      "acc_stderr,none": 0.014045826789783656
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-baseline",
+    "model_args": "None",
+    "model_num_parameters": "374362112",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "16",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/os-gated-deltanet-340M-dd-decay-d0ones",
+  "results": {
+    "drop": {
+      "alias": "drop",
+      "em,none": 0.0006291946308724832,
+      "em_stderr,none": 0.0002568002749723905,
+      "f1,none": 0.024332005033557074,
+      "f1_stderr,none": 0.000953033185567201
+    },
+    "nq_open": {
+      "alias": "nq_open",
+      "exact_match,remove_whitespace": 0.0,
+      "exact_match_stderr,remove_whitespace": 0.0
+    },
+    "triviaqa": {
+      "alias": "triviaqa",
+      "exact_match,remove_whitespace": 0.0,
+      "exact_match_stderr,remove_whitespace": 0.0
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/os-gated-deltanet-340M-dd-decay-d0ones",
+    "model_args": "None",
+    "model_num_parameters": "380033402",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "64",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

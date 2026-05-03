@@ -1,19 +1,13 @@
 #!/usr/bin/env python3
-"""Evaluate a model with lm_eval by loading it manually to avoid dtype issues."""
+"""Evaluate retrieval tasks (NIAH, FDA, SWDE, SQuAD) aligned with Gated DeltaNet paper."""
 
 import argparse
 import json
-import sys
 import torch
-import fla  # noqa — registers FLA model types (delta_net, gated_deltanet, kda, etc.)
-try:
-    import fla.models.os_delta_net  # noqa — registers OSLA model type
-except ImportError:
-    pass
+import fla  # noqa
+import fla.models.osla  # noqa
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import lm_eval
-from lm_eval.api.registry import register_model
 from lm_eval.models.huggingface import HFLM
 from lm_eval import evaluator
 
@@ -22,9 +16,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', required=True)
     parser.add_argument('--output', required=True)
-    parser.add_argument('--tasks', default='wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge')
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--tasks', required=True)
+    parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--max_length', type=int, default=None)
+    parser.add_argument('--metadata', type=str, default=None)
     args = parser.parse_args()
 
     print(f"Loading model from {args.model_path} on {args.device}...")
@@ -36,24 +32,25 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
     print(f"Model loaded: {type(model).__name__}, params: {sum(p.numel() for p in model.parameters())/1e6:.1f}M")
 
-    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)
+    lm_kwargs = dict(pretrained=model, tokenizer=tokenizer, batch_size=args.batch_size)
+    if args.max_length is not None:
+        lm_kwargs['max_length'] = args.max_length
+    lm = HFLM(**lm_kwargs)
 
     tasks = [t.strip() for t in args.tasks.split(',')]
     print(f"Running tasks: {tasks}")
 
-    from lm_eval.tasks import TaskManager
-    task_manager = TaskManager(include_defaults=True)
-
-    results = evaluator.simple_evaluate(
+    eval_kwargs = dict(
         model=lm,
         tasks=tasks,
         batch_size=args.batch_size,
         log_samples=False,
-        confirm_run_unsafe_code=True,
-        task_manager=task_manager,
     )
+    if args.metadata:
+        eval_kwargs['metadata'] = json.loads(args.metadata)
 
-    # Print summary table
+    results = evaluator.simple_evaluate(**eval_kwargs)
+
     print("\n" + "="*80)
     print(f"Results for: {args.model_path}")
     print("="*80)
@@ -62,7 +59,6 @@ def main():
         print(f"  {task:30s}: {relevant}")
     print("="*80)
 
-    # Save results (strip non-serializable objects)
     clean_results = {
         'model_path': args.model_path,
         'results': results['results'],

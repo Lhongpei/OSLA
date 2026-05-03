@@ -1,0 +1,29 @@
+{
+  "model_path": "experiments/osla_340M/exp/deltanet-340M-osla-osgm-chunk-run2",
+  "results": {
+    "squad_completion": {
+      "alias": "squad_completion",
+      "contains,none": 0.3049597855227882,
+      "contains_stderr,none": "N/A"
+    }
+  },
+  "config": {
+    "model": "experiments/osla_340M/exp/deltanet-340M-osla-osgm-chunk-run2",
+    "model_args": "None",
+    "model_num_parameters": "374386688",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "16",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

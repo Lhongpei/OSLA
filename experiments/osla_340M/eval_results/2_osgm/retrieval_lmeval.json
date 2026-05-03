@@ -1,0 +1,41 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-osla-osgm-chunk-run2",
+  "results": {
+    "drop": {
+      "alias": "drop",
+      "em,none": 0.00010486577181208053,
+      "em_stderr,none": 0.000104865771812088,
+      "f1,none": 0.02432151845637584,
+      "f1_stderr,none": 0.0007976644947906589
+    },
+    "nq_open": {
+      "alias": "nq_open",
+      "exact_match,remove_whitespace": 0.009141274238227148,
+      "exact_match_stderr,remove_whitespace": 0.0015842211138014717
+    },
+    "triviaqa": {
+      "alias": "triviaqa",
+      "exact_match,remove_whitespace": 0.0020062416406598305,
+      "exact_match_stderr,remove_whitespace": 0.0003340473294295126
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-osla-osgm-chunk-run2",
+    "model_args": "None",
+    "model_num_parameters": "374386688",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "64",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/deltanet-340M-baseline",
+  "results": {
+    "based_fda": {
+      "contains": 0.08719346049046321,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_fda_twice": {
+      "contains": 0.04450499545867393,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_swde": {
+      "contains": 0.08903467666354264,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_swde_twice": {
+      "contains": 0.15745079662605435,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_squad": {
+      "contains": 0.287201881088344,
+      "n_samples": 2977,
+      "n_skipped": 7
+    },
+    "based_squad_twice": {
+      "contains": 0.2314410480349345,
+      "n_samples": 2977,
+      "n_skipped": 7
+    }
+  }
+}

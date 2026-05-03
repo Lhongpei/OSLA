@@ -1,0 +1,35 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/gated-deltanet-340M-baseline-v2",
+  "results": {
+    "based_fda": {
+      "contains": 0.08810172570390554,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_fda_twice": {
+      "contains": 0.03451407811080836,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_swde": {
+      "contains": 0.13402061855670103,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_swde_twice": {
+      "contains": 0.17994376757263356,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_squad": {
+      "contains": 0.28585824655693653,
+      "n_samples": 2977,
+      "n_skipped": 7
+    },
+    "based_squad_twice": {
+      "contains": 0.20255290560967418,
+      "n_samples": 2977,
+      "n_skipped": 7
+    }
+  }
+}

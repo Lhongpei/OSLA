@@ -1,0 +1,35 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/os-gated-deltanet-340M-dd-decay-d0ones",
+  "results": {
+    "based_fda": {
+      "contains": 0.0,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_fda_twice": {
+      "contains": 0.0036330608537693005,
+      "n_samples": 1101,
+      "n_skipped": 1
+    },
+    "based_swde": {
+      "contains": 0.020618556701030927,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_swde_twice": {
+      "contains": 0.01780693533270853,
+      "n_samples": 1067,
+      "n_skipped": 44
+    },
+    "based_squad": {
+      "contains": 0.04400403090359422,
+      "n_samples": 2977,
+      "n_skipped": 7
+    },
+    "based_squad_twice": {
+      "contains": 0.06919717836748404,
+      "n_samples": 2977,
+      "n_skipped": 7
+    }
+  }
+}

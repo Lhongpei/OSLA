@@ -1,0 +1,41 @@
+{
+  "model_path": "/data0/OSLA/experiments/osla_340M/exp/kda-340M-baseline",
+  "results": {
+    "drop": {
+      "alias": "drop",
+      "em,none": 0.00010486577181208053,
+      "em_stderr,none": 0.000104865771812088,
+      "f1,none": 0.024279572147651092,
+      "f1_stderr,none": 0.0008060095763572481
+    },
+    "nq_open": {
+      "alias": "nq_open",
+      "exact_match,remove_whitespace": 0.023822714681440444,
+      "exact_match_stderr,remove_whitespace": 0.0025384378369153657
+    },
+    "triviaqa": {
+      "alias": "triviaqa",
+      "exact_match,remove_whitespace": 0.0048484172982612575,
+      "exact_match_stderr,remove_whitespace": 0.0005185576988642763
+    }
+  },
+  "config": {
+    "model": "/data0/OSLA/experiments/osla_340M/exp/kda-340M-baseline",
+    "model_args": "None",
+    "model_num_parameters": "373600312",
+    "model_dtype": "torch.bfloat16",
+    "model_revision": "main",
+    "model_sha": "",
+    "batch_size": "64",
+    "batch_sizes": "[]",
+    "device": "None",
+    "use_cache": "None",
+    "limit": "None",
+    "bootstrap_iters": "100000",
+    "gen_kwargs": "None",
+    "random_seed": "0",
+    "numpy_seed": "1234",
+    "torch_seed": "1234",
+    "fewshot_seed": "1234"
+  }
+}
