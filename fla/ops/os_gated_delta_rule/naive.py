@@ -197,24 +197,16 @@ def naive_recurrent_os_gated_delta_rule_post_gate_regret(
     gamma_log: torch.Tensor | None = None,
     g_decay: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    """OSGM + GDN with the *post-gate regret* hypergradient (OS_GDN_REPORT §3.4).
+    """OSGM + GDN with a beta-aware post-gate hypergradient.
 
-    Same forward state recurrence as `naive_recurrent_os_gated_delta_rule`,
-    but `d` is updated using the regret of `f(S_t) − f(α·S_{t−1})` instead
-    of `f(S_t) − f(S_{t−1})`. Concretely:
+    This follows the actual GatedDeltaNet recurrence order:
 
-        e' = v − k^T·S_{t-1}                  (pre-gate residual)
-        ẽ  = v − α·k^T·S_{t-1} = (1−α)·v + α·e'  (post-gate residual)
-        grad_d = ⟨ẽ, e'⟩ / (‖e'‖² + eps) − ⟨d, k²⟩
+        S_bar = α·S
+        e     = v − k^T·S_bar
+        S_new = S_bar + β·(d⊙k)·e^T
 
-    Reduces to `1 − ⟨d, k²⟩` (the un-gated `dd_decay` formula) when α≡1,
-    so non-gated configs train identically to plain OSDN.
-
-    The forward convention matches the chunk kernel:
-        - residual / projection uses raw `k` (NOT `kw = k·d`),
-        - state absorption uses `kw`,
-        - the GDN gate `α = exp(g_log)` is applied to S BEFORE the rank-1
-          delta write.
+    The readback residual contracts by ``1 - β⟨d,k²⟩``, so the OSGM direction is
+    ``β(1 - β⟨d,k²⟩)k²``. When β≡1 this reduces to the original OSGM rule.
 
     Args / shapes: same as `naive_recurrent_os_gated_delta_rule`.
     """
@@ -245,20 +237,17 @@ def naive_recurrent_os_gated_delta_rule_post_gate_regret(
 
         k_sq = k_t * k_t
         alpha = g_t.exp()                                # [B, H]
-        alpha_v = alpha[..., None]                        # [B, H, 1] for V-bcast
 
-        # Pre-gate residual e' = v - k^T·S_{t-1}, against the *un-gated* state.
-        # k_t shape [B,H,K]; S shape [B,H,K,V] → sum over K-axis (dim -2) gives [B,H,V].
-        proj = (S * k_t[..., None]).sum(-2)               # [B, H, V]
-        e_prime = v_t - proj
-        # Post-gate residual ẽ = v - α·proj  =  (1-α)·v + α·e' (algebraic identity).
-        e_tilde = (1.0 - alpha_v) * v_t + alpha_v * e_prime
+        # Decay first, then compute the residual against the decayed state.
+        S_bar = alpha[..., None, None] * S
+        proj = (S_bar * k_t[..., None]).sum(-2)           # [B, H, V]
+        residual = v_t - proj
 
-        # Post-gate regret hypergradient.
-        e_prime_norm_sq = (e_prime * e_prime).sum(-1, keepdim=True) + 1e-8  # [B,H,1]
-        e_dot = (e_tilde * e_prime).sum(-1, keepdim=True)                    # [B,H,1]
+        # Beta-aware OSGM hypergradient. The effective contraction is
+        # beta * <d, k^2>, not just <d, k^2>.
         inner_d_k = (d_curr * k_sq).sum(-1, keepdim=True)                    # [B,H,1]
-        grad_d = e_dot / e_prime_norm_sq - inner_d_k                         # [B,H,1]
+        beta_v = b_t[..., None]                                               # [B,H,1]
+        grad_d = beta_v * (1.0 - beta_v * inner_d_k)                          # [B,H,1]
 
         # OSGM-side decay on d (separate from state gate α).
         if decay_mode == "none":
@@ -278,11 +267,9 @@ def naive_recurrent_os_gated_delta_rule_post_gate_regret(
         if d_min is not None and d_max is not None:
             d_next = d_next.clamp(d_min, d_max)
 
-        # State update: S ← α·S + β·kw·e'^T  (kw uses the d *before* the OSGM step,
-        # matching the chunk kernel which absorbs at d_t and steps to d_{t+1} after).
-        S = alpha[..., None, None] * S
+        # State update: S ← α·S + β·kw·e^T  (kw uses d before the OSGM step).
         kw_t = k_t * d_curr
-        S = S + kw_t[..., None] * (b_t[..., None] * e_prime)[..., None, :]
+        S = S_bar + kw_t[..., None] * (b_t[..., None] * residual)[..., None, :]
 
         # Output.
         q_scaled = q_t * scale

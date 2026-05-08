@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-OSGM + GatedDeltaNet with the *post-gate regret* hypergradient (OS_GDN_REPORT §3.4).
+OSGM + GatedDeltaNet with a beta-aware post-gate hypergradient.
 
 Background (why this exists):
   Plain OSGM-on-DeltaNet uses ``grad_d = 1 − ⟨d, k²⟩`` because the per-step
@@ -10,16 +10,24 @@ Background (why this exists):
   so the un-modified hypergradient is biased and OSGM's regret bound's
   comparator class becomes too weak (see §3.2–3.3 of the report).
 
-Fix derived in §3.4: replace the regret reference with f(α·S_{t−1}) instead
-of f(S_{t−1}), giving
+Fix: use the same reference state as the actual GatedDeltaNet update, after
+applying the forget gate. Let
 
-    grad_d = ⟨ẽ, e'⟩ / ‖e'‖² − ⟨d, k²⟩
+    S̄  = α·S_{t−1}
+    e  = v − k^T·S̄
+    r  = ⟨d, k²⟩
 
-where  e' = v − k^T·S_{t−1}     (pre-gate residual)
-       ẽ  = v − α·k^T·S_{t−1}    (post-gate residual)
+The preconditioned write is
 
-When α≡1, this collapses to ``1 − ⟨d, k²⟩`` exactly, so un-gated training
-is unaffected (DeltaNet/OSDN tests still pass).
+    S_t = S̄ + β·(d⊙k)·e^T,
+
+so the readback residual becomes ``e_t = (1 − βr)e``. The OSGM fixed point is
+therefore ``β⟨d,k²⟩ = 1``, and the online direction is
+
+    β · (1 − β⟨d,k²⟩) · k².
+
+When β≡1 this collapses to the original ``1 − ⟨d,k²⟩`` rule. When d≡1 the
+forward path matches vanilla GatedDeltaNet exactly.
 
 Implementation notes
 --------------------
@@ -48,7 +56,9 @@ _DEFAULT_CHUNK = 64
 # overhead that dominates wall-time at production scale (21 layers × T=4096
 # yields ~86k host iterations per fwd; without compile MFU collapses to <0.1%).
 # Disable via OSLA_DISABLE_POST_GATE_COMPILE=1 if a torch/inductor regression
-# breaks compilation on a given host.
+# breaks compilation on a given host. Training currently defaults to the eager
+# chunk step because AOTAutograd/Inductor keeps too many chunk-state buffers
+# alive at 340M/seq4096 scale and can OOM 80GB H100s before Adam state init.
 _DISABLE_COMPILE = os.environ.get("OSLA_DISABLE_POST_GATE_COMPILE", "0") == "1"
 
 
@@ -98,19 +108,18 @@ def _post_gate_chunk_step(
         b_t = beta_c_f[:, t]           # [B, H]
         a_t = alpha_c[:, t]            # [B, H]
 
-        # Pre-gate residual e' = v − k^T·S
-        proj = (S * k_t[..., None]).sum(-2)               # [B, H, V]
-        e_prime = v_t - proj                               # [B, H, V]
-        # Post-gate residual ẽ = (1-α)·v + α·e'
-        a_v = a_t[..., None]                               # [B, H, 1]
-        e_tilde = (1.0 - a_v) * v_t + a_v * e_prime
+        # Match GatedDeltaNet exactly: decay state first, then compute the
+        # delta-rule residual against the decayed state.
+        S_bar = a_t[..., None, None] * S
+        proj = (S_bar * k_t[..., None]).sum(-2)             # [B, H, V]
+        residual = v_t - proj                               # [B, H, V]
 
-        # Hypergradient
-        e_norm_sq = (e_prime * e_prime).sum(-1, keepdim=True) + 1e-8   # [B,H,1]
-        e_dot = (e_tilde * e_prime).sum(-1, keepdim=True)              # [B,H,1]
+        # Beta-aware OSGM direction. Since the actual readback contraction is
+        # beta * <d, k^2>, the one-step optimum is beta * <d, k^2> = 1.
         k_sq = k_t * k_t
         inner_d_k = (d * k_sq).sum(-1, keepdim=True)                   # [B,H,1]
-        grad_d = e_dot / e_norm_sq - inner_d_k                          # [B,H,1]
+        beta_v = b_t[..., None]                                         # [B,H,1]
+        grad_d = beta_v * (1.0 - beta_v * inner_d_k)                    # [B,H,1]
 
         # OSGM-side decay
         if decay_mode == "none":
@@ -130,10 +139,10 @@ def _post_gate_chunk_step(
         if d_min is not None and d_max is not None:
             d_next = d_next.clamp(d_min, d_max)
 
-        # State update: S ← α·S + β·kw·e'^T (rank-1 outer)
+        # State update: S ← α·S + β·kw·e^T (rank-1 outer), where e is the
+        # residual against the decayed state S_bar.
         kw_t = k_t * d                                                  # uses d at step t
-        S = a_t[..., None, None] * S
-        S = S + kw_t[..., None] * (b_t[..., None] * e_prime)[..., None, :]
+        S = S_bar + kw_t[..., None] * (b_t[..., None] * residual)[..., None, :]
 
         # Output
         q_scaled = q_t * scale
@@ -231,7 +240,8 @@ def post_gate_regret_recurrence(
     if use_checkpoint is None:
         use_checkpoint = q.requires_grad and torch.is_grad_enabled()
     if use_compile is None:
-        use_compile = q.is_cuda and not _DISABLE_COMPILE
+        training_with_grad = torch.is_grad_enabled() and q.requires_grad
+        use_compile = q.is_cuda and not _DISABLE_COMPILE and not training_with_grad
     chunk_fn = _compiled_chunk_step if use_compile else _post_gate_chunk_step
 
     n_chunks = T // chunk_size

@@ -15,12 +15,24 @@ dist-packages/*
 
 # experimental results
 exp
+exp/
 results
 outputs
 wandb
 *.csv
 *.png
 *.html
+logs/
+hf_upload/
+.codex_tmp/
+experiments/**/eval_results/**/logs/
+experiments/**/eval_results/
+experiments/**/eval_results/**/*.pid
+experiments/**/eval_results/**/*.done
+experiments/**/eval_results/**/*.exit
+experiments/**/eval_results/**/*.log
+experiments/**/eval_results/**/*.jsonl
+experiments/**/migration_logs/**/*.pid
 
 # log and config files
 log.*
@@ -30,20 +42,27 @@ log.*
 
 # pycache
 __pycache__
+*.pyc
+*.pyo
+.pytest_cache/
 
 # saved model
 *.pkl
 *.pt
 *.safetensors
 
-# experiment configs, scripts, and eval results are tracked by default;
-# model outputs under exp/ are excluded by the 'exp' rule above.
+# Experiment configs and scripts are tracked by default. New eval outputs are
+# ignored unless explicitly force-added, and model outputs under exp/ are
+# excluded by the 'exp' rule above.
 
 # vscode
 .vscode
 
 # macOS
 .DS_Store
+
+# local one-off backups created during server handoffs
+*.pre_codex_*
 
 # Draft
 simulate.py

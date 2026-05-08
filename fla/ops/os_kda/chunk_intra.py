@@ -320,7 +320,7 @@ def chunk_kda_fwd_kernel_inter_solve_fused(
 )
 @triton.jit(do_not_specialize=['B', 'T'])
 def chunk_kda_bwd_kernel_intra(
-    q, k, d, g, beta, dAqk, dAkk, dq, dk, dd, dg, db, cu_seqlens, chunk_indices, B, T,
+    q, k, d, g, beta, dAqk, dAkk, dq, dq2, dk, dk2, dd, dd2, dg, dg2, db, cu_seqlens, chunk_indices, B, T,
     H: tl.constexpr, K: tl.constexpr, BT: tl.constexpr, BC: tl.constexpr, BK: tl.constexpr, NC: tl.constexpr, IS_VARLEN: tl.constexpr, SAFE_GATE: tl.constexpr, USE_GATHER: tl.constexpr,
 ):
     i_kc, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -350,9 +350,13 @@ def chunk_kda_bwd_kernel_intra(
     dAqk += (bos * H + i_h) * BT
     dAkk += (bos * H + i_h) * BT
     dq += (bos * H + i_h) * K
+    dq2 += (bos * H + i_h) * K
     dk += (bos * H + i_h) * K
+    dk2 += (bos * H + i_h) * K
     dd += (bos * H + i_h) * K
+    dd2 += (bos * H + i_h) * K
     dg += (bos * H + i_h) * K
+    dg2 += (bos * H + i_h) * K
     db += (i_k * all + bos) * H + i_h
 
     p_g = tl.make_block_ptr(g, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
@@ -450,9 +454,10 @@ def chunk_kda_bwd_kernel_intra(
     b_q = tl.load(p_q, boundary_check=(0, 1))
     
     p_dq = tl.make_block_ptr(dq, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
+    p_dq2 = tl.make_block_ptr(dq2, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     b_dg2 = b_q * b_dq2
     b_dq2 = b_dq2 + tl.load(p_dq, boundary_check=(0, 1))
-    tl.store(p_dq, b_dq2.to(p_dq.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dq2, b_dq2.to(p_dq2.dtype.element_ty), boundary_check=(0, 1))
     tl.debug_barrier()
 
     b_dkt = tl.zeros([BC, BK], dtype=tl.float32)
@@ -509,7 +514,7 @@ def chunk_kda_bwd_kernel_intra(
             b_dAkk_i = tl.load(dAkk + (i_ti + i)*H*BT + i_i*BC + o_i, mask=o_i <= i, other=0)
             
             b_qi = tl.load(q + (i_ti + i)*H*K + o_k, mask=m_k, other=0).to(tl.float32)
-            b_kbi = tl.load(k + (i_ti + i)*H*K + o_k, mask=m_k, other=0).to(tl.float32) * tl.load(beta + i_ti + i)
+            b_kbi = tl.load(k + (i_ti + i)*H*K + o_k, mask=m_k, other=0).to(tl.float32) * tl.load(beta + (i_ti + i) * H).to(tl.float32)
             b_gi = tl.load(g + (i_ti + i)*H*K + o_k, mask=m_k, other=0).to(tl.float32)
             
             b_g_exp = exp2(b_gi[None, :] - b_g)
@@ -518,8 +523,11 @@ def chunk_kda_bwd_kernel_intra(
 
     p_d_out = tl.make_block_ptr(d, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dk = tl.make_block_ptr(dk, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
+    p_dk2 = tl.make_block_ptr(dk2, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dd = tl.make_block_ptr(dd, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
+    p_dd2 = tl.make_block_ptr(dd2, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_dg = tl.make_block_ptr(dg, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
+    p_dg2 = tl.make_block_ptr(dg2, (T, K), (H*K, 1), (i_ti, i_k * BK), (BC, BK), (1, 0))
     p_db = tl.make_block_ptr(db, (T,), (H,), (i_ti,), (BC,), (0,))
 
     b_d_out = tl.load(p_d_out, boundary_check=(0, 1))
@@ -534,12 +542,12 @@ def chunk_kda_bwd_kernel_intra(
     b_dd_final = b_dkw_total * b_k_out
 
     b_dg2 += b_dk_left * b_k_out - b_dkt * (b_k_out * b_d_out) + tl.load(p_dg, boundary_check=(0, 1))
-    b_db_total = tl.load(p_db, boundary_check=(0,)) + b_db_intra
+    b_db_total = b_db_intra
 
-    tl.store(p_dk, b_dk_final.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dd, b_dd_final.to(p_dd.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dg, b_dg2.to(g.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_db, b_db_total.to(beta.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_dk2, b_dk_final.to(p_dk2.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dd2, b_dd_final.to(p_dd2.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_dg2, b_dg2.to(p_dg2.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_db, b_db_total.to(p_db.dtype.element_ty), boundary_check=(0,))
     
 @triton.heuristics({
     'IS_VARLEN': lambda args: args['cu_seqlens'] is not None,
@@ -682,8 +690,17 @@ def chunk_kda_bwd_intra(
     NC = triton.cdiv(BT, BC)
     NK = triton.cdiv(K, BK)
 
+    dq2 = torch.empty_like(dq, dtype=torch.float)
+    dk2 = torch.empty_like(dk, dtype=torch.float)
+    dd2 = torch.empty_like(dd, dtype=torch.float)
+    dg2 = torch.empty_like(dg, dtype=torch.float)
+    db2 = beta.new_empty(NK, *beta.shape, dtype=torch.float)
+
     chunk_kda_bwd_kernel_intra[(NK * NC, NT, B * H)](
-        q=q, k=k, d=d, g=g, beta=beta, dAqk=dAqk, dAkk=dAkk, dq=dq, dk=dk, dd=dd, dg=dg, db=db, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
+        q=q, k=k, d=d, g=g, beta=beta, dAqk=dAqk, dAkk=dAkk,
+        dq=dq, dq2=dq2, dk=dk, dk2=dk2, dd=dd, dd2=dd2, dg=dg, dg2=dg2, db=db2,
+        cu_seqlens=cu_seqlens, chunk_indices=chunk_indices,
         B=B, T=T, H=H, K=K, BT=BT, BC=BC, BK=BK, NC=NC, IS_VARLEN=(cu_seqlens is not None), SAFE_GATE=safe_gate, USE_GATHER=IS_GATHER_SUPPORTED,
     )
-    return dq, dk, db, dg
+    db = db2.sum(0).add_(db)
+    return dq2, dk2, dd2, db, dg2

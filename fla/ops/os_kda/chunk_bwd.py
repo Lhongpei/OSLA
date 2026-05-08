@@ -1,4 +1,6 @@
 # Copyright (c) 2023-2026, Songlin Yang, Yu Zhang, Zhiyuan Li
+import math
+import os
 import torch
 import triton
 import triton.language as tl
@@ -13,6 +15,7 @@ from fla.ops.utils import chunk_local_cumsum, prepare_chunk_indices
 from fla.ops.utils.constant import RCP_LN2
 from fla.ops.utils.op import exp2
 from fla.utils import IS_NVIDIA_HOPPER, autotune_cache_kwargs, check_shared_mem, IS_GATHER_SUPPORTED
+from fla.ops.os_delta_rule.chunk_osgm_phase_dd_decay_beta import compute_osgm_dd_decay_beta_phase1_bwd
 
 BK_LIST = [32, 64] if check_shared_mem() else [16, 32]
 BV_LIST = [64, 128] if check_shared_mem('ampere') else [16, 32]
@@ -112,6 +115,19 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
     b_dA = tl.zeros([BT, BT], dtype=tl.float32)
     b_db = tl.zeros([BT], dtype=tl.float32)
 
+    for i_v in range(tl.cdiv(V, BV)):
+        p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dv = tl.make_block_ptr(dv, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+        p_dv2 = tl.make_block_ptr(dv2, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
+
+        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_dv = tl.load(p_dv, boundary_check=(0, 1))
+        b_dvb = tl.dot(b_A, b_dv)
+
+        b_dA += tl.dot(b_dv, tl.trans(b_v))
+        b_db += tl.sum(b_dvb * b_v, 1)
+        tl.store(p_dv2, (b_dvb * b_beta[:, None]).to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
+
     for i_k in range(tl.cdiv(K, BK)):
         o_k = i_k * BK + tl.arange(0, BK)
         m_k = o_k < K
@@ -154,16 +170,6 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
             b_dk += tl.dot(b_v_new, b_dh.to(b_v_new.dtype)) 
             b_dw += tl.dot(b_dv.to(b_v_new.dtype), b_h.to(b_v_new.dtype))
             tl.debug_barrier()
-            
-            if i_k == 0:
-                p_v = tl.make_block_ptr(v, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                p_dv2 = tl.make_block_ptr(dv2, (T, V), (H*V, 1), (i_t * BT, i_v * BV), (BT, BV), (1, 0))
-                b_v = tl.load(p_v, boundary_check=(0, 1))
-                b_dA += tl.dot(b_dv, tl.trans(b_v))
-                b_dvb = tl.dot(b_A, b_dv)
-                b_dv2 = b_dvb * b_beta[:, None]
-                b_db += tl.sum(b_dvb * b_v, 1)
-                tl.store(p_dv2, b_dv2.to(p_dv2.dtype.element_ty), boundary_check=(0, 1))
 
         b_gk_exp = exp2(b_g)
         b_gb = b_gk_exp * b_beta[:, None]
@@ -172,9 +178,9 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         
         b_dk_tilde = b_dk * tl.where(m_t[:, None], exp2(b_gn[None, :] - b_g), 0)
 
-        b_kbg = b_k * b_beta[:, None] * b_gk_exp 
+        b_kg = b_k * b_gk_exp
         b_dw = -b_dw.to(b_A.dtype)
-        b_dA += tl.dot(b_dw, tl.trans(b_kbg.to(b_A.dtype)))
+        b_dA += tl.dot(b_dw, tl.trans(b_kg.to(b_A.dtype)))
 
         b_dkgb = tl.dot(b_A, b_dw)
         b_dk_raw = b_dkgb * b_gb 
@@ -183,10 +189,10 @@ def chunk_kda_bwd_kernel_wy_dqkg_fused(
         p_q = tl.make_block_ptr(q, (T, K), (H*K, 1), (i_t * BT, i_k * BK), (BT, BK), (1, 0))
         b_q = tl.load(p_q, boundary_check=(0, 1))
         
-        b_kdk = (b_k * b_dk_raw) + (b_k * b_d) * b_dk_tilde
-        b_dgk += tl.sum(b_kdk, axis=0)
+        b_kd_dk_tilde = (b_k * b_d) * b_dk_tilde
+        b_dgk += tl.sum(b_kd_dk_tilde, axis=0)
         
-        b_dg = b_q * b_dq - b_kdk + m_last[:, None] * b_dgk + (b_k * b_gk_exp) * b_dkgb * b_beta[:, None] 
+        b_dg = b_q * b_dq - b_kd_dk_tilde + m_last[:, None] * b_dgk + (b_k * b_gk_exp) * b_dkgb * b_beta[:, None]
         
         b_dk_final = b_dk_raw + b_dk_tilde * b_d
         b_dd_final = b_dk_tilde * b_k
@@ -395,14 +401,14 @@ def chunk_kda_bwd_kernel_intra(
     b_dk_final = b_dk_raw_total + b_dkw_total * b_d_out
     b_dd_final = b_dkw_total * b_k_out
 
-    b_dg2 += b_dk_left * b_k_out + tl.load(p_dg, boundary_check=(0, 1))
+    b_dg2 += (b_dk_raw_intra - b_dkt * b_d_out) * b_k_out + tl.load(p_dg, boundary_check=(0, 1))
     
     b_db_total = tl.load(p_db, boundary_check=(0,)) + b_db_intra
 
     tl.store(p_dk, b_dk_final.to(p_dk.dtype.element_ty), boundary_check=(0, 1))
     tl.store(p_dd, b_dd_final.to(p_dd.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_dg, b_dg2.to(g.dtype.element_ty), boundary_check=(0, 1))
-    tl.store(p_db, b_db_total.to(beta.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_dg, b_dg2.to(p_dg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_db, b_db_total.to(p_db.dtype.element_ty), boundary_check=(0,))
 
 def chunk_kda_bwd_dAv(q, k, v, do, A=None, scale=None, cu_seqlens=None, chunk_size=64, chunk_indices=None):
     B, T, H, K, V = *k.shape, do.shape[-1]
@@ -452,7 +458,8 @@ def chunk_kda_bwd_wy_dqkg_fused(
     return dq, dk, dv, db, dg, dA
 
 def chunk_kda_bwd(
-    q, k, v, beta, Aqk, Akk, scale, initial_state, do, dht, d, dd_final, eta, use_denominator, d_min, d_max, output_initial_d_gradient, 
+    q, k, v, beta, Aqk, Akk, scale, initial_state, do, dht, d, dd_final, eta, use_denominator, d_min, d_max, output_initial_d_gradient,
+    beta_aware=False, decay_mode="none", decay_gamma=1.0, g_decay=None,
     g=None, g_org=None, cu_seqlens=None, chunk_indices=None, chunk_size=64, safe_gate=False, lower_bound=None,
     use_gate_in_kernel=False, A_log=None, dt_bias=None, disable_recompute=False, cp_context=None, transpose_state_layout=False, **kwargs,
 ):
@@ -482,7 +489,7 @@ def chunk_kda_bwd(
         A=Akk, h=h, do=do, dh=dh, dv=dv, scale=scale, cu_seqlens=cu_seqlens, chunk_size=chunk_size, chunk_indices=chunk_indices, transpose_state_layout=transpose_state_layout,
     )
 
-    dq, dk, db, dg = chunk_kda_bwd_intra(
+    dq, dk, dd, db, dg = chunk_kda_bwd_intra(
         q=q, 
         k=k, 
         g=g, 
@@ -501,9 +508,35 @@ def chunk_kda_bwd(
         safe_gate=safe_gate
     )
 
-    dk_phase1, dd_initial = compute_osgm_phase1_bwd(
-        k=k, d_out=d, dd_in=dd, eta=eta, use_denominator=use_denominator, d_min=d_min, d_max=d_max, cu_seqlens=cu_seqlens, dd_final=dd_final, output_initial_state_gradient=output_initial_d_gradient
-    )
+    detach_phase1 = os.environ.get("OSKDA_DETACH_PHASE1", "0") == "1"
+    dg_decay = None
+    if detach_phase1:
+        dk_phase1 = torch.zeros_like(k)
+        dd_initial = None
+    elif os.environ.get("OSKDA_KDA_GATE_DDECAY", "0") == "1":
+        raise NotImplementedError("OSKDA_KDA_GATE_DDECAY currently requires OSKDA_DETACH_PHASE1=1")
+    elif beta_aware:
+        if decay_mode == "none":
+            phase1_g_decay = torch.zeros_like(beta, dtype=torch.float32)
+        elif decay_mode == "constant":
+            phase1_g_decay = torch.full_like(beta, math.log(float(decay_gamma)), dtype=torch.float32)
+        elif decay_mode == "data_dependent":
+            if g_decay is None:
+                raise ValueError("decay_mode='data_dependent' requires g_decay")
+            phase1_g_decay = g_decay.to(torch.float32)
+        else:
+            raise NotImplementedError(f"Unsupported OS-KDA d decay mode: {decay_mode}")
+        dk_phase1, dd_initial, dg_decay, db_phase1 = compute_osgm_dd_decay_beta_phase1_bwd(
+            k=k, g=phase1_g_decay, beta=beta, d_out=d, dd_in=dd,
+            eta=eta, use_denominator=use_denominator, d_min=d_min, d_max=d_max,
+            cu_seqlens=cu_seqlens, dd_final=dd_final,
+            output_initial_state_gradient=output_initial_d_gradient,
+        )
+        db = db + db_phase1.to(db)
+    else:
+        dk_phase1, dd_initial = compute_osgm_phase1_bwd(
+            k=k, d_out=d, dd_in=dd, eta=eta, use_denominator=use_denominator, d_min=d_min, d_max=d_max, cu_seqlens=cu_seqlens, dd_final=dd_final, output_initial_state_gradient=output_initial_d_gradient
+        )
 
     dk_final = dk + dk_phase1
 
@@ -512,4 +545,4 @@ def chunk_kda_bwd(
     if use_gate_in_kernel:
         dg, dA, dbias = kda_gate_bwd(g=g_org, A_log=A_log, dt_bias=dt_bias, dyg=dg, lower_bound=lower_bound)
 
-    return dq, dk_final, dv, db, dg, dh0, dA, dbias, dd_initial
+    return dq, dk_final, dv, db, dg, dh0, dA, dbias, dd_initial, dg_decay

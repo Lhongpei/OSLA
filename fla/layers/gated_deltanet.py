@@ -20,7 +20,10 @@ from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, 
 from fla.modules import FusedRMSNormGated, RMSNorm, ShortConvolution
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule, fused_recurrent_gated_delta_rule
 from fla.ops.gated_delta_rule.gate import fused_gdn_gate
-from fla.ops.os_gated_delta_rule import chunk_os_gated_delta_rule
+from fla.ops.os_gated_delta_rule import (
+    chunk_os_gated_delta_rule,
+    fused_recurrent_os_gated_delta_rule,
+)
 from fla.ops.os_gated_delta_rule.post_gate_regret import post_gate_regret_recurrence
 
 if TYPE_CHECKING:
@@ -138,17 +141,13 @@ class GatedDeltaNet(nn.Module):
                                                      # life within chunk") instead of
                                                      # exp(g_cum_t) ("decay so far").
                                                      # Bounded magnitude across chunk.
-        osgm_post_gate_regret: bool = False,         # use the §3.4 post-gate regret
-                                                     # hypergradient: grad_d =
-                                                     # ⟨ẽ, e'⟩/‖e'‖² − ⟨d, k²⟩.
-                                                     # Reduces to (1 − ⟨d,k²⟩) at α=1.
-                                                     # Currently routes through a
-                                                     # pure-pytorch chunked recurrence
-                                                     # with activation checkpointing
-                                                     # (slower than the chunk kernel
-                                                     # but correct under autograd).
-        osgm_post_gate_regret_chunk_size: int = 64,  # checkpoint chunk size for the
-                                                     # post-gate-regret recurrence.
+        osgm_post_gate_regret: bool = False,         # use the section 3.4 post-gate regret
+                                                     # hypergradient. For the production
+                                                     # data_dependent setting this routes
+                                                     # through beta-aware Triton phase1 plus
+                                                     # the OS-GDN chunk state kernels.
+        osgm_post_gate_regret_chunk_size: int = 64,  # fallback reference chunk size for
+                                                     # non-data-dependent variants.
         **kwargs,
     ) -> GatedDeltaNet:
         super().__init__()
@@ -327,6 +326,7 @@ class GatedDeltaNet(nn.Module):
                 self.initial_scale = nn.Parameter(
                     torch.ones(self.num_v_heads, self.head_k_dim)
                 )
+                self.initial_scale._no_weight_decay = True
             # Decay-mode-specific parameters (mirror delta_net.py conventions).
             if self.osgm_decay_mode == "learnable":
                 # γ = sigmoid(gamma_log); init to ~0.999 (logit(0.999) ≈ 6.9).
@@ -350,6 +350,8 @@ class GatedDeltaNet(nn.Module):
                     # Init so initial γ ≈ 0.999 (logsigmoid(6.9) ≈ -0.001).
                     nn.init.zeros_(self.osgm_a_proj.weight)
                     nn.init.constant_(self.osgm_a_proj.bias, 6.9)
+                    self.osgm_a_proj.weight._no_weight_decay = True
+                    self.osgm_a_proj.bias._no_weight_decay = True
                     # Mark as already-initialized so HuggingFace's `_init_weights`
                     # skips this Linear and does NOT clobber the bias back to 0.
                     # Without this flag, the generic nn.Linear branch in the model's
@@ -383,6 +385,25 @@ class GatedDeltaNet(nn.Module):
                     f"Expected one of: none, learnable, constant, data_dependent."
                 )
 
+    def _osgm_supports_fused_recurrent(self) -> bool:
+        if not self.use_osgm:
+            return False
+        # Fused recurrent only implements the post-gate-regret math used by the
+        # production 340M configs.
+        if not self.osgm_post_gate_regret:
+            return False
+        if self.osgm_decay_mode not in ("none", "data_dependent"):
+            return False
+        if self.osgm_decay_mode == "data_dependent" and self.osgm_d_decay_source != "gdn":
+            return False
+        # Variants below have not been ported to the fused kernel; they keep
+        # using chunk at decode (correct but slow).
+        if self.osgm_post_gate_residual:
+            return False
+        if self.gate_aware_hypergradient:
+            return False
+        return True
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -401,11 +422,14 @@ class GatedDeltaNet(nn.Module):
 
         batch_size, q_len, _ = hidden_states.shape
         # change to inference mode.
-        # OS-GDN does not have a fused_recurrent kernel yet, so always use chunk.
-        if self.use_osgm:
-            mode = self.mode
-        else:
-            mode = 'fused_recurrent' if (q_len <= 64 and not self.training) else self.mode
+        # OS-GDN supports fused_recurrent decode for the post_gate_regret +
+        # decay_mode in {"none", "data_dependent" with source="gdn"} configs
+        # (the production 340M settings). Other OSGM variants fall back to
+        # chunk because the new fused kernel only covers post-gate-regret math.
+        can_fuse = (q_len <= 64) and (not self.training) and (
+            (not self.use_osgm) or self._osgm_supports_fused_recurrent()
+        )
+        mode = 'fused_recurrent' if can_fuse else self.mode
         if self.training:
             assert mode == 'chunk', "Only chunk mode is supported in training."
 
@@ -512,25 +536,48 @@ class GatedDeltaNet(nn.Module):
                     # underflow-driven instability through the cumsum bwd.
                     g_phase1_residual = g_phase1_residual.clamp(min=self.osgm_post_gate_clamp_min)
             if self.osgm_post_gate_regret:
-                # §3.4 path. l2-normalize q,k externally (the chunk kernel does this
-                # internally via use_qk_l2norm_in_kernel; the pure-pytorch path can't
-                # so we do it here under autograd).
-                q_n = F.normalize(q, p=2, dim=-1, eps=1e-6)
-                k_n = F.normalize(k, p=2, dim=-1, eps=1e-6)
                 eta = self.osgm_eta if self.osgm_eta is not None else 1.0
-                o, recurrent_state = post_gate_regret_recurrence(
-                    q=q_n, k=k_n, v=v, g=g, beta=beta,
-                    eta=eta,
-                    initial_state=(initial_h, initial_d),
-                    output_final_state=use_cache,
-                    cu_seqlens=cu_seqlens,
-                    d_min=self.osgm_d_min,
-                    d_max=self.osgm_d_max,
-                    decay_mode=self.osgm_decay_mode,
-                    gamma_log=gamma_log,
-                    g_decay=g_decay,
-                    chunk_size=self.osgm_post_gate_regret_chunk_size,
-                )
+                if self.osgm_decay_mode in ("none", "data_dependent"):
+                    # Fast path: beta-aware phase1 in Triton plus the existing
+                    # OS-GDN chunk state kernels. The no-decay variant uses a
+                    # WY/chunk phase1; data_dependent uses the recurrent
+                    # beta-aware decay phase1.
+                    o, recurrent_state = chunk_os_gated_delta_rule(
+                        q=q,
+                        k=k,
+                        v=v,
+                        g=g,
+                        beta=beta,
+                        initial_state=(initial_h, initial_d),
+                        output_final_state=use_cache,
+                        cu_seqlens=cu_seqlens,
+                        use_qk_l2norm_in_kernel=True,
+                        eta=eta,
+                        use_denominator=self.osgm_use_denominator,
+                        d_min=self.osgm_d_min,
+                        d_max=self.osgm_d_max,
+                        decay_mode=self.osgm_decay_mode,
+                        g_decay=g_decay,
+                        post_gate_regret_beta_aware=True,
+                    )
+                else:
+                    # Fallback reference for non-dd-decay variants. The production
+                    # 340M config uses data_dependent and should stay on the fast path.
+                    q_n = F.normalize(q, p=2, dim=-1, eps=1e-6)
+                    k_n = F.normalize(k, p=2, dim=-1, eps=1e-6)
+                    o, recurrent_state = post_gate_regret_recurrence(
+                        q=q_n, k=k_n, v=v, g=g, beta=beta,
+                        eta=eta,
+                        initial_state=(initial_h, initial_d),
+                        output_final_state=use_cache,
+                        cu_seqlens=cu_seqlens,
+                        d_min=self.osgm_d_min,
+                        d_max=self.osgm_d_max,
+                        decay_mode=self.osgm_decay_mode,
+                        gamma_log=gamma_log,
+                        g_decay=g_decay,
+                        chunk_size=self.osgm_post_gate_regret_chunk_size,
+                    )
             else:
                 o, recurrent_state = chunk_os_gated_delta_rule(
                     q=q,
@@ -568,23 +615,54 @@ class GatedDeltaNet(nn.Module):
                 dt_bias=self.dt_bias,
             )
         elif mode == 'fused_recurrent':
-            if self.use_osgm:
-                raise NotImplementedError(
-                    "OS-GDN (use_osgm=True) does not have a fused_recurrent inference kernel yet. "
-                    "Use chunk mode for training and inference, or extend `fla.ops.os_gated_delta_rule`."
-                )
             g = fused_gdn_gate(g=self.a_proj(hidden_states), A_log=self.A_log, dt_bias=self.dt_bias)
-            o, recurrent_state = fused_recurrent_gated_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                beta=beta,
-                initial_state=recurrent_state,
-                output_final_state=use_cache,
-                cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
-            )
+            if self.use_osgm:
+                # Decode path: post_gate_regret + {none, data_dependent (gdn-source)}.
+                # `_osgm_supports_fused_recurrent` already gated us into this branch.
+                initial_h, initial_d = (
+                    recurrent_state if isinstance(recurrent_state, tuple)
+                    else (recurrent_state, None)
+                )
+                if initial_d is None:
+                    N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
+                    initial_d = (
+                        self.initial_scale
+                        .unsqueeze(0).expand(N, -1, -1).contiguous().float()
+                    )
+                # GDN-source dd_decay aliases g_decay to the raw GDN log-decay.
+                g_decay = g if self.osgm_decay_mode == "data_dependent" else None
+                eta = self.osgm_eta if self.osgm_eta is not None else 1.0
+                o, h_final, d_final = fused_recurrent_os_gated_delta_rule(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g,
+                    beta=beta,
+                    g_decay=g_decay,
+                    scale=None,
+                    eta=eta,
+                    d_min=self.osgm_d_min,
+                    d_max=self.osgm_d_max,
+                    initial_state=initial_h,
+                    initial_d=initial_d,
+                    output_final_state=use_cache,
+                    use_qk_l2norm_in_kernel=True,
+                    decay_mode=self.osgm_decay_mode,
+                    cu_seqlens=cu_seqlens,
+                )
+                recurrent_state = (h_final, d_final) if use_cache else None
+            else:
+                o, recurrent_state = fused_recurrent_gated_delta_rule(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g,
+                    beta=beta,
+                    initial_state=recurrent_state,
+                    output_final_state=use_cache,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=True,
+                )
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
 

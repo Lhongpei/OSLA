@@ -73,16 +73,15 @@ class OSGDNConfig(PretrainedConfig):
                                                      # instead of exp(g_cum_t) ("decay so far").
                                                      # Late-in-chunk tokens get weight 1;
                                                      # bounded magnitude across chunk.
-        osgm_post_gate_regret: bool = False,         # OS_GDN_REPORT §3.4: replace OSGM's
-                                                     # surrogate loss with f(S_t)−f(α·S_{t−1}).
-                                                     # Hypergradient becomes
-                                                     # ⟨ẽ,e'⟩/‖e'‖² − ⟨d,k²⟩, removing
-                                                     # state-gate contamination of the
-                                                     # original regret. Mutually exclusive
-                                                     # with osgm_post_gate_residual and
+        osgm_post_gate_regret: bool = False,         # OS_GDN_REPORT section 3.4: compute
+                                                     # the delta residual after the GDN
+                                                     # state gate. The beta-aware phase1
+                                                     # target is beta * <d,k^2> = 1.
+                                                     # Mutually exclusive with
+                                                     # osgm_post_gate_residual and
                                                      # gate_aware_hypergradient.
-        osgm_post_gate_regret_chunk_size: int = 64,  # checkpoint chunk size for the
-                                                     # post-gate-regret recurrence.
+        osgm_post_gate_regret_chunk_size: int = 64,  # fallback reference chunk size for
+                                                     # non-data-dependent variants.
         **kwargs,
     ):
         self.attn_mode = attn_mode

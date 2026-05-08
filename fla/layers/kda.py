@@ -19,6 +19,8 @@ from fla.layers.utils import get_layer_cache, get_unpad_data, index_first_axis, 
 from fla.modules import FusedRMSNormGated, ShortConvolution
 from fla.ops.kda import chunk_kda, fused_recurrent_kda
 from fla.ops.kda.gate import fused_kda_gate
+from fla.ops.os_kda import chunk_kda as os_chunk_kda
+from fla.ops.os_kda import fused_recurrent_kda as os_fused_recurrent_kda
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -97,6 +99,14 @@ class KimiDeltaAttention(nn.Module):
         conv_bias: bool = False,
         layer_idx: int = None,
         norm_eps: float = 1e-5,
+        use_osgm: bool = False,
+        osgm_eta: float | None = None,
+        osgm_use_denominator: bool | None = None,
+        osgm_d_min: float | None = None,
+        osgm_d_max: float | None = None,
+        osgm_beta_aware: bool = True,
+        osgm_decay_mode: str = "none",
+        osgm_decay_gamma: float = 1.0,
         **kwargs,
     ) -> KimiDeltaAttention:
         super().__init__()
@@ -107,6 +117,14 @@ class KimiDeltaAttention(nn.Module):
         self.lower_bound = lower_bound
         self.hidden_size = hidden_size
         self.expand_v = expand_v
+        self.use_osgm = use_osgm
+        self.osgm_eta = osgm_eta
+        self.osgm_use_denominator = osgm_use_denominator
+        self.osgm_d_min = osgm_d_min
+        self.osgm_d_max = osgm_d_max
+        self.osgm_beta_aware = osgm_beta_aware
+        self.osgm_decay_mode = osgm_decay_mode
+        self.osgm_decay_gamma = osgm_decay_gamma
 
         self.use_short_conv = use_short_conv
         self.conv_size = conv_size
@@ -189,6 +207,18 @@ class KimiDeltaAttention(nn.Module):
         self.o_norm = FusedRMSNormGated(self.head_v_dim, activation="sigmoid", eps=norm_eps)
         self.o_proj = nn.Linear(self.value_dim, hidden_size, bias=False)
 
+        if self.use_osgm and self.osgm_decay_mode == "data_dependent":
+            self.osgm_a_proj = nn.Linear(hidden_size, self.num_heads, bias=True)
+            nn.init.zeros_(self.osgm_a_proj.weight)
+            nn.init.constant_(self.osgm_a_proj.bias, 6.9)
+            self.osgm_a_proj.weight._is_hf_initialized = True
+            self.osgm_a_proj.bias._is_hf_initialized = True
+
+        if self.use_osgm:
+            # Keep the initial OS-KDA forward close to vanilla KDA. The OS
+            # preconditioner then learns relative per-key-dim corrections.
+            self.initial_scale = nn.Parameter(torch.ones(self.num_v_heads, self.head_k_dim))
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -206,8 +236,11 @@ class KimiDeltaAttention(nn.Module):
             )
 
         batch_size, q_len, _ = hidden_states.shape
-        # change to inference mode.
-        mode = "fused_recurrent" if (q_len <= 64 and not self.training) else self.mode
+        mode = (
+            "fused_recurrent"
+            if (q_len <= 64 and not self.training)
+            else self.mode
+        )
         if self.training:
             assert mode == "chunk", "Only chunk mode is supported in training."
 
@@ -247,6 +280,9 @@ class KimiDeltaAttention(nn.Module):
 
         g = self.f_proj(hidden_states)
         beta = self.b_proj(hidden_states).sigmoid()
+        g_decay = None
+        if self.use_osgm and self.osgm_decay_mode == "data_dependent":
+            g_decay = F.logsigmoid(self.osgm_a_proj(hidden_states))
 
         q, k, g = (rearrange(x, "... (h d) -> ... h d", d=self.head_k_dim) for x in (q, k, g))
         v = rearrange(v, "... (h d) -> ... h d", d=self.head_v_dim)
@@ -255,12 +291,101 @@ class KimiDeltaAttention(nn.Module):
         if self.num_v_heads > self.num_heads:
             q, k, g = (repeat(x, "... h d -> ... (h g) d", g=self.num_v_heads // self.num_heads) for x in (q, k, g))
             beta = repeat(beta, "... h -> ... (h g)", g=self.num_v_heads // self.num_heads)
+            if g_decay is not None:
+                g_decay = repeat(g_decay, "... h -> ... (h g)", g=self.num_v_heads // self.num_heads)
 
         if self.allow_neg_eigval:
             beta = beta * 2.0
 
         recurrent_state = last_state["recurrent_state"] if last_state is not None else None
-        if mode == "chunk":
+        if self.use_osgm and mode == "chunk":
+            initial_h, initial_d = (
+                recurrent_state if isinstance(recurrent_state, tuple)
+                else (recurrent_state, None)
+            )
+            if initial_d is None:
+                N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
+                initial_d = (
+                    self.initial_scale
+                    .unsqueeze(0)
+                    .expand(N, -1, -1)
+                    .contiguous()
+                    .float()
+                )
+            o, final_h, final_d = os_chunk_kda(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                initial_state=initial_h,
+                initial_d=initial_d,
+                output_final_state=use_cache,
+                output_final_d=use_cache,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                safe_gate=self.safe_gate,
+                lower_bound=self.lower_bound,
+                cu_seqlens=cu_seqlens,
+                eta=self.osgm_eta if self.osgm_eta is not None else 1.0,
+                use_denominator=bool(self.osgm_use_denominator),
+                d_min=self.osgm_d_min,
+                d_max=self.osgm_d_max,
+                beta_aware=self.osgm_beta_aware,
+                decay_mode=self.osgm_decay_mode,
+                decay_gamma=self.osgm_decay_gamma,
+                g_decay=g_decay,
+            )
+            recurrent_state = (final_h, final_d) if use_cache else None
+        elif self.use_osgm and mode == "fused_recurrent":
+            initial_h, initial_d = (
+                recurrent_state if isinstance(recurrent_state, tuple)
+                else (recurrent_state, None)
+            )
+            if initial_d is None:
+                N = q.shape[0] if cu_seqlens is None else len(cu_seqlens) - 1
+                initial_d = (
+                    self.initial_scale
+                    .unsqueeze(0)
+                    .expand(N, -1, -1)
+                    .contiguous()
+                    .float()
+                )
+            os_result = os_fused_recurrent_kda(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                scale=self.head_k_dim ** -0.5,
+                eta=self.osgm_eta if self.osgm_eta is not None else 1.0,
+                use_denominator=bool(self.osgm_use_denominator),
+                d_min=self.osgm_d_min,
+                d_max=self.osgm_d_max,
+                beta_aware=self.osgm_beta_aware,
+                decay_mode=self.osgm_decay_mode,
+                decay_gamma=self.osgm_decay_gamma,
+                g_decay=g_decay,
+                initial_state=initial_h,
+                initial_d=initial_d,
+                output_final_state=use_cache,
+                output_final_d=use_cache,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                lower_bound=self.lower_bound,
+                cu_seqlens=cu_seqlens,
+            )
+            if use_cache:
+                o, final_h, final_d = os_result
+            else:
+                o, _ = os_result
+                final_h, final_d = None, None
+            recurrent_state = (final_h, final_d) if use_cache else None
+        elif mode == "chunk":
             o, recurrent_state = chunk_kda(
                 q=q,
                 k=k,

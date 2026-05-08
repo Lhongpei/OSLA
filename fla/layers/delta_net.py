@@ -208,7 +208,8 @@ class DeltaNet(nn.Module):
                 # Buffer (not Parameter) since d is detached — no gradient through EMA.
                 self.register_buffer('initial_scale', torch.ones(num_heads, self.head_k_dim))
             else:
-                self.initial_scale = nn.Parameter(torch.zeros(num_heads, self.head_k_dim))
+                # Start from d0=1 so OSGM/OSDN initially matches vanilla DeltaNet.
+                self.initial_scale = nn.Parameter(torch.ones(num_heads, self.head_k_dim))
         if use_osgm and self.osgm_decay_mode == "learnable":
             self.osgm_gamma_log = nn.Parameter(torch.full((num_heads,), 6.9))
             self.osgm_gamma_log._no_weight_decay = True

@@ -43,6 +43,14 @@ class KDAConfig(PretrainedConfig):
         fuse_cross_entropy: bool = True,
         use_l2warp: bool = False,
         vocab_size: int = 32000,
+        use_osgm: bool = False,
+        osgm_eta: float | None = None,
+        osgm_use_denominator: bool | None = None,
+        osgm_d_min: float | None = None,
+        osgm_d_max: float | None = None,
+        osgm_beta_aware: bool = True,
+        osgm_decay_mode: str = "none",
+        osgm_decay_gamma: float = 1.0,
         **kwargs,
     ):
         self.attn_mode = attn_mode
@@ -72,6 +80,14 @@ class KDAConfig(PretrainedConfig):
         self.allow_neg_eigval = allow_neg_eigval
         self.safe_gate = safe_gate
         self.lower_bound = lower_bound
+        self.use_osgm = use_osgm
+        self.osgm_eta = osgm_eta
+        self.osgm_use_denominator = osgm_use_denominator
+        self.osgm_d_min = osgm_d_min
+        self.osgm_d_max = osgm_d_max
+        self.osgm_beta_aware = osgm_beta_aware
+        self.osgm_decay_mode = osgm_decay_mode
+        self.osgm_decay_gamma = osgm_decay_gamma
         if safe_gate and lower_bound is None:
             raise ValueError("`lower_bound` must be specified when `safe_gate=True` (recommended: -5).")
 

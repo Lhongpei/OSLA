@@ -10,6 +10,8 @@
 #   torch       2.6.0
 #   triton      3.2.0  (comes bundled with torch)
 #   transformers 4.51.3
+#   datasets    3.3.2  (flame expects ShufflingConfig)
+#   torchtitan  0.1.0  (matches torch 2.6 APIs)
 #   fla         (installed -e from this repo)
 #   flame       (installed -e from flame/ submodule)
 #
@@ -76,15 +78,18 @@ echo "  active python: $(which python)"
 # --- 3) install deps ---
 echo ""
 echo "[3/4] Installing python deps..."
-# Torch first — pip will pick the right CUDA wheel based on the host.
+# Torch first — install the CUDA 12.4 wheel used by the validated setup.
 # We pin torch==2.6.0 because that's what the primary box runs and what
 # the chunk kernels were tested against; bumping torch independently
 # also bumps triton, which can introduce kernel ABI changes.
 python -m pip install --upgrade pip
 python -m pip install \
-    "torch==2.6.0" \
+    --index-url https://download.pytorch.org/whl/cu124 \
+    "torch==2.6.0+cu124"
+python -m pip install \
     "transformers==4.51.3" \
-    "datasets>=3.3.0" \
+    "datasets==3.3.2" \
+    "torchtitan==0.1.0" \
     "einops" \
     "ninja" \
     "wandb" \
@@ -93,19 +98,23 @@ python -m pip install \
     "torchdata"
 
 # fla (this repo) and flame (submodule) — editable installs.
+# Use --no-deps so package metadata cannot silently upgrade the pinned
+# torch/triton stack above.
 echo "  installing fla (this repo) -e ..."
-python -m pip install -e "$REPO"
+python -m pip install -e "$REPO" --no-deps
 echo "  installing flame -e ..."
-python -m pip install -e "$REPO/flame"
+python -m pip install -e "$REPO/flame" --no-deps
 
 # --- 4) verify ---
 echo ""
 echo "[4/4] Verifying imports..."
 python - <<'PY'
-import torch, triton, transformers, fla
+import datasets, torch, torchtitan, triton, transformers, fla
 print(f"torch        {torch.__version__}")
 print(f"triton       {triton.__version__}")
 print(f"transformers {transformers.__version__}")
+print(f"datasets     {datasets.__version__}")
+print("torchtitan   importable")
 print(f"fla          {getattr(fla, '__version__', 'local-editable')}")
 print(f"cuda         available={torch.cuda.is_available()}, "
       f"device_count={torch.cuda.device_count()}")
@@ -116,6 +125,12 @@ print("post_gate_regret_recurrence: importable ✓")
 from fla.models.os_gated_deltanet import OSGDNConfig, OSGDNForCausalLM
 print("OSGDNForCausalLM: importable ✓")
 PY
+
+(cd "$REPO/flame" && python - <<'PY'
+import flame.train
+print("flame.train: importable ✓")
+PY
+)
 
 echo ""
 echo "================================================================"
